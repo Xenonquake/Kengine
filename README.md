@@ -177,7 +177,7 @@ Validation layers are enabled by default when available.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `window_width/height` | 1280×720 | Initial framebuffer size |
+| `window_width/height` | 1476×830 | Initial framebuffer size |
 | `vsync` | `true` | FIFO present mode |
 | `frame_graph.enable_bloom` | `true` | Bloom pass (stub) |
 | `frame_graph.enable_dof` | `true` | Depth of field pass (stub) |
