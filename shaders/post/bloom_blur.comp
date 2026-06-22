@@ -1,0 +1,26 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0, rgba16f) uniform readonly image2D inputImage;
+layout(binding = 1, rgba16f) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform Push {
+    vec2 direction;
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size  = imageSize(inputImage);
+
+    vec3 result = vec3(0.0);
+    float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+
+    for (int i = -4; i <= 4; ++i) {
+        ivec2 offset = coord + ivec2(pc.direction * float(i));
+        offset = clamp(offset, ivec2(0), size - 1);
+        float w = weights[abs(i)];
+        result += imageLoad(inputImage, offset).rgb * w;
+    }
+    imageStore(outputImage, coord, vec4(result, 1.0));
+}

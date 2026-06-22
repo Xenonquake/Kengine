@@ -1,0 +1,20 @@
+#pragma once
+
+namespace kengine {
+
+enum class RetroStyle {
+    Galaga,
+    GeometryWars,
+    DeathTank,
+};
+
+struct RetroVisualState {
+    RetroStyle style            = RetroStyle::GeometryWars;
+    float w_morph               = 0.0f;
+    float w_slice               = 0.0f;
+    float glow_intensity        = 1.5f;
+    float scanline_strength     = 0.35f;
+    float pixel_snap            = 64.0f;
+};
+
+} // namespace kengine

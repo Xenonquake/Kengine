@@ -1,0 +1,37 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer SampleDirections {
+    vec4 directions_weights[];
+};
+
+layout(std430, binding = 1) buffer RadianceSamples {
+    float radiance[];
+};
+
+layout(std430, binding = 2) buffer SHCoefficients {
+    float coeffs[];
+};
+
+shared float shared_coeffs[9];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx == 0u) {
+        for (int i = 0; i < 9; ++i) shared_coeffs[i] = 0.0;
+    }
+    barrier();
+
+    /* Per-sample accumulation stub — full basis eval matches CPU path */
+    if (idx < directions_weights.length()) {
+        float w = directions_weights[idx].w;
+        float L = radiance[idx];
+        shared_coeffs[0] += L * w * 0.28209479;
+    }
+    barrier();
+
+    if (idx < 9u) {
+        coeffs[idx] = shared_coeffs[idx];
+    }
+}

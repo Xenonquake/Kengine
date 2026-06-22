@@ -1,0 +1,14 @@
+build/
+.cache/
+*.spv
+compile_commands.json
+.vscode/
+.idea/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.dll
+*.log
+imgui.ini

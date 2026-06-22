@@ -1,0 +1,62 @@
+#pragma once
+
+#include "kengine/render/frame_graph.hpp"
+#include "kengine/render/pipeline_manager.hpp"
+#include "kengine/render/post_process.hpp"
+#include "kengine/render/retro_pipeline.hpp"
+#include "kengine/vulkan/context.hpp"
+#include "kengine/vulkan/swapchain.hpp"
+#include <cstdint>
+#include <vulkan/vulkan_raii.hpp>
+#include <vector>
+
+namespace kengine {
+
+class FrameRenderer {
+public:
+    FrameRenderer(VulkanContext& ctx, Swapchain& swapchain,
+                  PipelineManager& pipelines, PostProcessPipeline& post,
+                  FrameGraph& frame_graph);
+    ~FrameRenderer();
+
+    void bind_frame_graph_passes();
+    void render_frame(float time, const RetroPipelineState& state);
+
+    bool needs_resize(vk::Extent2D extent) const;
+    void on_resize(vk::Extent2D extent);
+
+private:
+    void create_sync_objects();
+    void create_command_buffers();
+    void create_geometry_buffers();
+    void record_scene_pass(std::uint32_t sync_index, float time,
+                           const RetroPipelineState& state);
+    void record_present_pass(std::uint32_t sync_index, std::uint32_t image_index,
+                             float time, const RetroPipelineState& state);
+
+    VulkanContext& ctx_;
+    Swapchain& swapchain_;
+    PipelineManager& pipelines_;
+    PostProcessPipeline& post_;
+    FrameGraph& frame_graph_;
+
+    std::uint32_t sync_index_ = 0;
+    std::uint32_t active_sync_index_ = 0;
+    std::uint32_t active_image_index_ = 0;
+    float pending_time_ = 0.0f;
+    RetroPipelineState pending_state_{};
+    vk::Extent2D last_extent_{};
+
+    std::uint32_t frames_in_flight_;
+
+    std::vector<vk::raii::Semaphore> image_available_;
+    std::vector<vk::raii::Semaphore> render_finished_;
+    std::vector<vk::raii::Fence> in_flight_;
+    std::vector<vk::raii::CommandBuffer> command_buffers_;
+
+    vk::raii::Buffer vertex_buffer_{nullptr};
+    vk::raii::DeviceMemory vertex_memory_{nullptr};
+    std::uint32_t vertex_count_ = 0;
+};
+
+} // namespace kengine
