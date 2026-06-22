@@ -4,6 +4,7 @@
 #include "kengine/ecs/registry.hpp"
 #include "kengine/lighting/spherical_harmonics.hpp"
 #include "kengine/physics/physics_world.hpp"
+#include "kengine/render/camera_4d.hpp"
 #include "kengine/render/frame_graph.hpp"
 #include "kengine/render/frame_renderer.hpp"
 #include "kengine/render/pipeline_manager.hpp"
@@ -62,6 +63,7 @@ private:
     std::unique_ptr<PipelineManager> pipelines_;
     std::unique_ptr<FrameRenderer> frame_renderer_;
     RetroVisualState retro_state_;
+    Camera4D camera_;
     float anim_time_ = 0.0f;
     bool running_ = false;
 };

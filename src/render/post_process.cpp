@@ -1,6 +1,7 @@
 #include "kengine/render/post_process.hpp"
 #include "kengine/vulkan/dynamic_renderer.hpp"
 #include "kengine/vulkan/pipeline_builder.hpp"
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -163,5 +164,19 @@ void PostProcessPipeline::configure(const FrameGraphConfig& config) {
 }
 
 void PostProcessPipeline::register_passes(FrameGraph& /*frame_graph*/) {}
+
+// Simple helper to produce tonemap constants for testing the post chain (bloom/dof/taa/sharpen + final).
+// Called by frame renderer; values chosen to visibly exercise current effects.
+TonemapPushConstants PostProcessPipeline::make_test_tonemap_constants(float time, float w_morph, float scan) const {
+    TonemapPushConstants pc;
+    // Exposure breathes a little to show hdr -> tonemap
+    pc.exposure = 1.15f + 0.25f * sinf(time * 0.7f) * (0.5f + 0.5f * w_morph);
+    pc.scanline_strength = scan;
+    pc.w_morph = w_morph;
+    pc.time = time;
+    // Future: feed config_.bloom_*, dof_* into other passes when implemented.
+    (void)config_;
+    return pc;
+}
 
 } // namespace kengine

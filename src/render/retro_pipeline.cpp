@@ -125,7 +125,8 @@ vk::raii::Pipeline RetroPipelineSet::create_pipeline(RetroPipelineKind kind) {
         desc = desc_fullscreen(formats_, shader_fullscreen_vert_, shader_composite_frag_, BlendMode::Opaque);
         break;
     case RetroPipelineKind::Fullscreen:
-        desc = desc_fullscreen(formats_, shader_fullscreen_vert_, shader_sprite2d_frag_, BlendMode::Opaque);
+        // Use a compatible frag that only consumes loc 0 (vUV) from fullscreen.vert
+        desc = desc_fullscreen(formats_, shader_fullscreen_vert_, shader_composite_frag_, BlendMode::Opaque);
         break;
     }
 

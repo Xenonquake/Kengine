@@ -1,5 +1,6 @@
 #include "kengine/render/frame_renderer.hpp"
 #include "kengine/vulkan/dynamic_renderer.hpp"
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -22,7 +23,7 @@ FrameRenderer::~FrameRenderer() {
 
 void FrameRenderer::bind_frame_graph_passes() {
     frame_graph_.set_pass_execute("geometry", [this]() {
-        record_scene_pass(active_sync_index_, pending_time_, pending_state_);
+        record_scene_pass(active_sync_index_, pending_time_, pending_state_, pending_cam_);
     });
     frame_graph_.set_pass_execute("present", [this]() {
         record_present_pass(active_sync_index_, active_image_index_,
@@ -58,50 +59,154 @@ void FrameRenderer::create_command_buffers() {
     command_buffers_ = ctx_.device().allocateCommandBuffers(alloc);
 }
 
-void FrameRenderer::create_geometry_buffers() {
-    std::vector<RetroVertex4D> verts = {
-        {{-0.6f, -0.3f, 0, 0}, {0, 1}, 0xFF00FFFF},
-        {{ 0.0f,  0.3f, 0, 0}, {0.5f, 0}, 0xFFFF00FF},
-        {{ 0.6f, -0.3f, 0, 0}, {1, 1}, 0xFF00FFFF},
-        {{-0.3f, 0.5f, 0, 0.5f}, {0, 1}, 0xFFFF44FF},
-        {{ 0.3f, 0.5f, 0, 0.5f}, {1, 0}, 0xFFFF44FF},
-        {{ 0.0f, 0.9f, 0, 1.0f}, {0.5f, 0.5f}, 0xFFFFFFFF},
-    };
-    vertex_count_ = static_cast<std::uint32_t>(verts.size());
-
-    vk::DeviceSize size = sizeof(RetroVertex4D) * verts.size();
-    vk::BufferCreateInfo buf_info;
-    buf_info.size  = size;
-    buf_info.usage = vk::BufferUsageFlagBits::eVertexBuffer;
-    vertex_buffer_ = ctx_.device().createBuffer(buf_info);
-
-    auto mem_req = vertex_buffer_.getMemoryRequirements();
-    auto mem_props = ctx_.physical_device().getMemoryProperties();
-
-    std::uint32_t mem_type = UINT32_MAX;
+static std::uint32_t pick_host_visible_mem_type(const vk::raii::PhysicalDevice& phys, std::uint32_t bits) {
+    auto mem_props = phys.getMemoryProperties();
     for (std::uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
-        if ((mem_req.memoryTypeBits & (1u << i))
-            && (mem_props.memoryTypes[i].propertyFlags
-                & vk::MemoryPropertyFlagBits::eHostVisible)) {
-            mem_type = i;
-            break;
+        if ((bits & (1u << i))
+            && (mem_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eHostVisible)) {
+            return i;
         }
     }
-    if (mem_type == UINT32_MAX) throw std::runtime_error("No host-visible memory");
+    return UINT32_MAX;
+}
 
-    vk::MemoryAllocateInfo alloc_info;
-    alloc_info.allocationSize  = mem_req.size;
-    alloc_info.memoryTypeIndex = mem_type;
-    vertex_memory_ = ctx_.device().allocateMemory(alloc_info);
-    vertex_buffer_.bindMemory(*vertex_memory_, 0);
+static void upload_host_buffer(vk::raii::DeviceMemory& mem,
+                               const void* data,
+                               vk::DeviceSize size) {
+    void* mapped = mem.mapMemory(0, size);
+    std::memcpy(mapped, data, static_cast<std::size_t>(size));
+    mem.unmapMemory();
+}
 
-    void* mapped = vertex_memory_.mapMemory(0, size);
-    std::memcpy(mapped, verts.data(), static_cast<std::size_t>(size));
-    vertex_memory_.unmapMemory();
+static vk::raii::Buffer create_vb(const vk::raii::Device& dev, vk::DeviceSize size) {
+    vk::BufferCreateInfo b;
+    b.size  = size;
+    b.usage = vk::BufferUsageFlagBits::eVertexBuffer;
+    return dev.createBuffer(b);
+}
+
+static vk::raii::DeviceMemory alloc_and_bind_host(const vk::raii::Device& dev,
+                                                  const vk::raii::PhysicalDevice& phys,
+                                                  vk::raii::Buffer& buf) {
+    auto mr = buf.getMemoryRequirements();
+    std::uint32_t mt = pick_host_visible_mem_type(phys, mr.memoryTypeBits);
+    if (mt == UINT32_MAX) throw std::runtime_error("No host-visible memory");
+    vk::MemoryAllocateInfo ai;
+    ai.allocationSize  = mr.size;
+    ai.memoryTypeIndex = mt;
+    auto memory = dev.allocateMemory(ai);
+    buf.bindMemory(*memory, 0);
+    return memory;
+}
+
+static std::vector<RetroVertex4D> make_sprite_quad(float x, float y, float z, float w,
+                                                   float sx, float sy, std::uint32_t color) {
+    // tiny quad as two tris, uv for the sprite shader
+    std::vector<RetroVertex4D> q(6);
+    q[0] = {{-sx + x, -sy + y, z, w}, {0, 1}, color};
+    q[1] = {{ sx + x, -sy + y, z, w}, {1, 1}, color};
+    q[2] = {{ sx + x,  sy + y, z, w}, {1, 0}, color};
+    q[3] = {{-sx + x, -sy + y, z, w}, {0, 1}, color};
+    q[4] = {{ sx + x,  sy + y, z, w}, {1, 0}, color};
+    q[5] = {{-sx + x,  sy + y, z, w}, {0, 0}, color};
+    return q;
+}
+
+void FrameRenderer::create_geometry_buffers() {
+    // --- Stars and rocks as Sprite4D (small quads in 4D) ---
+    std::vector<RetroVertex4D> sprite_verts;
+    // Stars (background, small, various w)
+    for (int i = 0; i < 18; ++i) {
+        float t = i * 1.7f;
+        float x = sinf(t * 0.7f) * (1.8f + (i % 3) * 0.6f);
+        float y = cosf(t * 1.1f) * (1.0f + (i % 2) * 0.8f);
+        float z = -1.5f - (i % 5) * 0.8f;
+        float w = sinf(t * 0.4f) * 1.2f;
+        float s = 0.018f + (i % 4) * 0.004f;
+        std::uint32_t col = (i % 3 == 0) ? 0xFFFFFF88u : 0xFFCCEEFFu;
+        auto q = make_sprite_quad(x, y, z, w, s, s, col);
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+    // Rocks (mid/fg, chunkier)
+    for (int i = 0; i < 7; ++i) {
+        float t = i * 2.3f + 0.5f;
+        float x = cosf(t) * (2.2f - i * 0.15f);
+        float y = sinf(t * 0.8f) * 1.6f - 0.4f;
+        float z = 0.2f + (i % 3) * 0.6f;
+        float w = cosf(t * 0.9f) * 0.8f - 0.3f;
+        float s = 0.09f + ((i + 2) % 3) * 0.025f;
+        std::uint32_t col = (i % 2 == 0) ? 0xFF88AACCu : 0xFF66BB99u;
+        auto q = make_sprite_quad(x, y, z, w, s, s * 0.7f, col);
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+
+    sprite_vertex_count_ = static_cast<std::uint32_t>(sprite_verts.size());
+    vk::DeviceSize sprite_size = sizeof(RetroVertex4D) * sprite_verts.size();
+
+    sprite_vertex_buffer_ = create_vb(ctx_.device(), sprite_size);
+    sprite_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), sprite_vertex_buffer_);
+    upload_host_buffer(sprite_vertex_memory_, sprite_verts.data(), sprite_size);
+
+    // --- Vector ship (LineStrip via VectorGlow) base shape (will be transformed each frame) ---
+    // Simple classic vector ship pointing up, centered near origin
+    ship_base_shape_ = {
+        {{ 0.00f,  0.18f, 0.02f, 0.05f}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // nose
+        {{-0.12f, -0.08f, 0.01f, 0.04f}, {0.0f, 1.0f}, 0xFFEEFFFFu}, // left wing
+        {{-0.04f, -0.02f, 0.00f, 0.03f}, {0.25f, 0.6f}, 0xFFCCEEFFu},
+        {{ 0.04f, -0.02f, 0.00f, 0.03f}, {0.75f, 0.6f}, 0xFFCCEEFFu},
+        {{ 0.12f, -0.08f, 0.01f, 0.04f}, {1.0f, 1.0f}, 0xFFEEFFFFu}, // right wing
+        {{ 0.00f,  0.18f, 0.02f, 0.05f}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // close nose
+    };
+    ship_vertex_count_ = static_cast<std::uint32_t>(ship_base_shape_.size());
+
+    vk::DeviceSize ship_size = sizeof(RetroVertex4D) * ship_base_shape_.size();
+    ship_vertex_buffer_ = create_vb(ctx_.device(), ship_size);
+    ship_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), ship_vertex_buffer_);
+    // initial upload (will be overwritten on first update)
+    upload_host_buffer(ship_vertex_memory_, ship_base_shape_.data(), ship_size);
+}
+
+static RetroVertex4D transform_ship_vert(const RetroVertex4D& base, float cx, float cy, float cz, float cw,
+                                         float yaw, float pitch_w) {
+    // very simple 2D-ish yaw in xy + slight w modulation
+    float c = cosf(yaw), s = sinf(yaw);
+    float x = base.pos[0] * c - base.pos[1] * s;
+    float y = base.pos[0] * s + base.pos[1] * c;
+    float z = base.pos[2] + (base.pos[1] * 0.15f) * sinf(pitch_w);
+    float w = base.pos[3] + cw + cosf(pitch_w) * 0.03f;
+    RetroVertex4D v = base;
+    v.pos[0] = x + cx;
+    v.pos[1] = y + cy;
+    v.pos[2] = z + cz;
+    v.pos[3] = w;
+    return v;
+}
+
+void FrameRenderer::update_ship_geometry(float time) {
+    if (ship_base_shape_.empty() || ship_vertex_count_ == 0) return;
+
+    // Zig zag ship in foreground: figure-8-ish path near viewer
+    float phase = time * 1.6f;
+    float zig_x = sinf(phase) * 1.6f + sinf(phase * 2.3f) * 0.4f;
+    float zig_y = cosf(phase * 0.7f) * 0.9f - 0.3f;
+    float zig_z = 2.4f + sinf(phase * 1.1f) * 0.25f; // closer
+    float zig_w = sinf(phase * 0.4f) * 0.35f + 0.05f;
+
+    float yaw   = sinf(phase * 1.3f) * 0.6f + sinf(phase) * 0.2f;
+    float pw    = sinf(phase * 2.0f) * 1.2f;
+
+    std::vector<RetroVertex4D> live(ship_base_shape_.size());
+    for (size_t i = 0; i < live.size(); ++i) {
+        live[i] = transform_ship_vert(ship_base_shape_[i], zig_x, zig_y, zig_z, zig_w, yaw, pw);
+    }
+
+    vk::DeviceSize sz = sizeof(RetroVertex4D) * live.size();
+    upload_host_buffer(ship_vertex_memory_, live.data(), sz);
+    ship_vertex_count_ = static_cast<std::uint32_t>(live.size());
 }
 
 void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
-                                      const RetroPipelineState& state) {
+                                      const RetroPipelineState& state, const Camera4D& cam) {
     auto& cmd = command_buffers_[sync_index];
     auto extent = pipelines_.scene_targets().extent();
     auto& targets = pipelines_.scene_targets().frame(sync_index);
@@ -118,7 +223,7 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     target.has_depth    = true;
 
     ClearValues clear;
-    clear.color = {0.02f, 0.02f, 0.06f, 1.0f};
+    clear.color = {0.0f, 0.0f, 0.0f, 1.0f};  // solid black for Space Arcade background
     DynamicRenderer::begin(cmd, target, clear);
 
     vk::Viewport viewport{0, 0, static_cast<float>(extent.width),
@@ -127,22 +232,28 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     cmd.setViewport(0, viewport);
     cmd.setScissor(0, scissor);
 
-    auto pc = pipelines_.make_push_constants(state, time, extent);
+    auto pc = pipelines_.make_push_constants(state, cam, time, extent);
 
     pipelines_.bind_scene(cmd, RetroPipelineKind::RetroComposite);
     pipelines_.push_scene_state(cmd, RetroPipelineKind::RetroComposite, pc);
     cmd.draw(3, 1, 0, 0);
 
+    // Update animated ship verts (zig zagging foreground vector ship)
+    update_ship_geometry(time);
+
+    // Stars + rocks
     pipelines_.bind_scene(cmd, RetroPipelineKind::Sprite4D);
     pipelines_.push_scene_state(cmd, RetroPipelineKind::Sprite4D, pc);
-    vk::DeviceSize offset = 0;
-    cmd.bindVertexBuffers(0, *vertex_buffer_, offset);
-    cmd.draw(vertex_count_, 1, 0, 0);
+    vk::DeviceSize off = 0;
+    cmd.bindVertexBuffers(0, *sprite_vertex_buffer_, off);
+    cmd.draw(sprite_vertex_count_, 1, 0, 0);
 
-    if (state.style == RetroStyle::GeometryWars || state.w_morph > 0.3f) {
+    // Vector line ship
+    if (state.style == RetroStyle::GeometryWars || state.w_morph > 0.1f) {
         pipelines_.bind_scene(cmd, RetroPipelineKind::VectorGlow);
         pipelines_.push_scene_state(cmd, RetroPipelineKind::VectorGlow, pc);
-        cmd.draw(3, 1, 0, 0);
+        cmd.bindVertexBuffers(0, *ship_vertex_buffer_, off);
+        cmd.draw(ship_vertex_count_, 1, 0, 0);
     }
 
     DynamicRenderer::end(cmd);
@@ -164,11 +275,7 @@ void FrameRenderer::record_present_pass(std::uint32_t sync_index,
     auto swapchain_image = swapchain_.image(image_index);
     DynamicRenderer::transition_color_to_attachment(cmd, swapchain_image);
 
-    TonemapPushConstants tonemap;
-    tonemap.exposure          = 1.2f;
-    tonemap.scanline_strength = state.scanline_strength;
-    tonemap.w_morph           = state.w_morph;
-    tonemap.time              = time;
+    auto tonemap = post_.make_test_tonemap_constants(time, state.w_morph, state.scanline_strength);
 
     post_.record_present(cmd, sync_index,
         *swapchain_.image_views()[image_index], extent, tonemap);
@@ -176,7 +283,7 @@ void FrameRenderer::record_present_pass(std::uint32_t sync_index,
     DynamicRenderer::transition_to_present(cmd, swapchain_image);
 }
 
-void FrameRenderer::render_frame(float time, const RetroPipelineState& state) {
+void FrameRenderer::render_frame(float time, const RetroPipelineState& state, const Camera4D& cam) {
     const std::uint32_t sync_index = sync_index_;
     auto& fence = in_flight_[sync_index];
     auto& cmd   = command_buffers_[sync_index];
@@ -191,6 +298,7 @@ void FrameRenderer::render_frame(float time, const RetroPipelineState& state) {
 
     pending_time_        = time;
     pending_state_       = state;
+    pending_cam_         = cam;
     active_sync_index_   = sync_index;
     active_image_index_  = image_index;
 

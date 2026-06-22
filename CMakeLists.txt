@@ -93,6 +93,7 @@ add_library(kengine STATIC
     src/render/retro_pipeline.cpp
     src/render/pipeline_manager.cpp
     src/render/frame_renderer.cpp
+    src/render/camera_4d.cpp
     src/render/render_graph.cpp
     src/render/frame_graph.cpp
     src/render/post_process.cpp

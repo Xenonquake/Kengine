@@ -1,6 +1,7 @@
 #include "kengine/render/pipeline_manager.hpp"
 #include "mat4.h"
 #include <cstring>
+#include <cmath>
 
 namespace kengine {
 
@@ -40,31 +41,11 @@ void PipelineManager::save_cache() {
 }
 
 RetroPushConstants PipelineManager::make_push_constants(
-    const RetroPipelineState& state, float time, vk::Extent2D extent) const {
+    const RetroPipelineState& state, const Camera4D& cam,
+    float time, vk::Extent2D extent) const {
 
     RetroPushConstants pc{};
-    float aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
-    ke_mat4 proj = ke_mat4_perspective(0.785398f, aspect, 0.1f, 100.0f);
-    ke_mat4 view = ke_mat4_look_at(
-        ke_vec3_make(0, 0, 3),
-        ke_vec3_make(0, 0, 0),
-        ke_vec3_make(0, 1, 0));
-    ke_mat4 mvp = ke_mat4_mul(proj, view);
-    std::memcpy(pc.mvp, mvp.m, sizeof(pc.mvp));
-
-    pc.w_slice            = state.w_slice;
-    pc.w_morph            = state.w_morph;
-    pc.glow_intensity     = state.glow_intensity;
-    pc.time               = time;
-    pc.hyper_rot[0]       = 0.4f;
-    pc.hyper_rot[1]       = 0.3f;
-    pc.hyper_rot[2]       = 0.2f;
-    pc.hyper_rot[3]       = 0.5f;
-    pc.viewport[0]        = static_cast<float>(extent.width);
-    pc.viewport[1]        = static_cast<float>(extent.height);
-    pc.scanline_strength  = state.scanline_strength;
-    pc.pixel_snap         = state.pixel_snap;
-    pc.palette_index      = static_cast<float>(state.style);
+    cam.fill_push_constants(pc, state, time, extent.width, extent.height);
     return pc;
 }
 

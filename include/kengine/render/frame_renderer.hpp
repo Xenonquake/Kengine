@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kengine/render/camera_4d.hpp"
 #include "kengine/render/frame_graph.hpp"
 #include "kengine/render/pipeline_manager.hpp"
 #include "kengine/render/post_process.hpp"
@@ -20,7 +21,7 @@ public:
     ~FrameRenderer();
 
     void bind_frame_graph_passes();
-    void render_frame(float time, const RetroPipelineState& state);
+    void render_frame(float time, const RetroPipelineState& state, const Camera4D& cam);
 
     bool needs_resize(vk::Extent2D extent) const;
     void on_resize(vk::Extent2D extent);
@@ -29,8 +30,9 @@ private:
     void create_sync_objects();
     void create_command_buffers();
     void create_geometry_buffers();
+    void update_ship_geometry(float time);
     void record_scene_pass(std::uint32_t sync_index, float time,
-                           const RetroPipelineState& state);
+                           const RetroPipelineState& state, const Camera4D& cam);
     void record_present_pass(std::uint32_t sync_index, std::uint32_t image_index,
                              float time, const RetroPipelineState& state);
 
@@ -45,6 +47,7 @@ private:
     std::uint32_t active_image_index_ = 0;
     float pending_time_ = 0.0f;
     RetroPipelineState pending_state_{};
+    Camera4D pending_cam_{};
     vk::Extent2D last_extent_{};
 
     std::uint32_t frames_in_flight_;
@@ -54,9 +57,16 @@ private:
     std::vector<vk::raii::Fence> in_flight_;
     std::vector<vk::raii::CommandBuffer> command_buffers_;
 
-    vk::raii::Buffer vertex_buffer_{nullptr};
-    vk::raii::DeviceMemory vertex_memory_{nullptr};
-    std::uint32_t vertex_count_ = 0;
+    vk::raii::Buffer sprite_vertex_buffer_{nullptr};
+    vk::raii::DeviceMemory sprite_vertex_memory_{nullptr};
+    std::uint32_t sprite_vertex_count_ = 0;
+
+    vk::raii::Buffer ship_vertex_buffer_{nullptr};
+    vk::raii::DeviceMemory ship_vertex_memory_{nullptr};
+    std::uint32_t ship_vertex_count_ = 0;
+
+    // CPU-side ship shape base (rebuilt each update)
+    std::vector<RetroVertex4D> ship_base_shape_;
 };
 
 } // namespace kengine

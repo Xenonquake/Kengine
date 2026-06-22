@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kengine/render/camera_4d.hpp"
 #include "kengine/render/retro_pipeline.hpp"
 #include "kengine/render/scene_targets.hpp"
 #include "kengine/vulkan/context.hpp"
@@ -24,6 +25,7 @@ public:
     SceneTargetSet& scene_targets() { return *scene_targets_; }
 
     RetroPushConstants make_push_constants(const RetroPipelineState& state,
+                                           const Camera4D& cam,
                                            float time, vk::Extent2D extent) const;
 
     void bind_scene(const vk::raii::CommandBuffer& cmd, RetroPipelineKind kind) const;

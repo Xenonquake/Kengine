@@ -38,6 +38,9 @@ public:
     void configure(const FrameGraphConfig& config);
     void register_passes(FrameGraph& frame_graph);
 
+    // Utility for demo/test of post effects
+    TonemapPushConstants make_test_tonemap_constants(float time, float w_morph, float scan) const;
+
 private:
     void create_pipeline(vk::Format swapchain_format);
     void create_descriptor_resources(std::uint32_t frames_in_flight);

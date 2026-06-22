@@ -57,6 +57,7 @@ void GpuImage::create(const GpuImageDesc& desc) {
     desc_ = desc;
 
     VkImageCreateInfo image_info{};
+    image_info.sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType   = VK_IMAGE_TYPE_2D;
     image_info.format      = static_cast<VkFormat>(desc.format);
     image_info.extent      = {desc.extent.width, desc.extent.height, 1};

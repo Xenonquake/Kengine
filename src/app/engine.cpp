@@ -1,6 +1,9 @@
 #include "kengine/app/engine.hpp"
 #include "kengine/core/service_locator.hpp"
+#include "kengine/render/camera_4d.hpp"
+#include <GLFW/glfw3.h>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 
 #ifndef M_PI
@@ -123,8 +126,36 @@ void Engine::shutdown() {
 void Engine::update(float dt) {
     anim_time_ += dt;
 
+    // Camera controls (WASD + QE for 3D strafe, ZX for w_slice, UIOP for hyper rots)
+    GLFWwindow* win = vulkan_ ? vulkan_->window() : nullptr;
+    if (win) {
+        float move = camera_.move_speed * dt;
+        float rot  = camera_.rot_speed * dt;
+        float sl   = camera_.slice_speed * dt;
+
+        if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) camera_.move(0, 0, -move);
+        if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) camera_.move(0, 0,  move);
+        if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) camera_.move(-move, 0, 0);
+        if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) camera_.move( move, 0, 0);
+        if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) camera_.move(0,  move, 0);
+        if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) camera_.move(0, -move, 0);
+
+        if (glfwGetKey(win, GLFW_KEY_Z) == GLFW_PRESS) camera_.adjust_slice(-sl);
+        if (glfwGetKey(win, GLFW_KEY_X) == GLFW_PRESS) camera_.adjust_slice( sl);
+
+        if (glfwGetKey(win, GLFW_KEY_U) == GLFW_PRESS) camera_.adjust_hyper(0,  rot);
+        if (glfwGetKey(win, GLFW_KEY_I) == GLFW_PRESS) camera_.adjust_hyper(0, -rot);
+        if (glfwGetKey(win, GLFW_KEY_O) == GLFW_PRESS) camera_.adjust_hyper(1,  rot);
+        if (glfwGetKey(win, GLFW_KEY_P) == GLFW_PRESS) camera_.adjust_hyper(1, -rot);
+
+        if (glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS) camera_.reset();
+    }
+
+    // Demo animation of w params; camera drives 4D slice/rot
     retro_state_.w_morph = 0.5f + 0.5f * sinf(anim_time_ * 0.4f);
-    retro_state_.w_slice = sinf(anim_time_ * 0.25f) * 0.5f;
+    // light idle wobble on slice if user hasn't touched it much (camera is authoritative)
+    camera_.w_slice = camera_.w_slice * 0.98f + sinf(anim_time_ * 0.25f) * 0.02f; // gentle
+    retro_state_.w_slice = camera_.w_slice;
 
     physics_->step(dt);
 
@@ -145,7 +176,7 @@ void Engine::render() {
         frame_renderer_->on_resize(extent);
     }
 
-    frame_renderer_->render_frame(anim_time_, retro_state_);
+    frame_renderer_->render_frame(anim_time_, retro_state_, camera_);
 }
 
 } // namespace kengine
