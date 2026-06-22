@@ -23,7 +23,7 @@ static float demo_env_radiance(const float dir[3], void* /*userdata*/) {
 }
 
 Engine::Engine(const EngineConfig& config) : config_(config) {
-    retro_state_.style = RetroStyle::GeometryWars;
+    retro_state_.style = RetroStyle::GeometryCore;
 }
 
 Engine::~Engine() {

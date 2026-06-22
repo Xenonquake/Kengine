@@ -68,7 +68,7 @@ geometry → [bloom] → [dof] → [taa] → [sharpen] → present
 - **4D positions** stored in `TransformComponent` and physics bodies (`ke_vec4`)
 - **mat4d** (C23) — hyper-rotations in xw/yw/xy/zw planes, stereographic projection, 2D↔4D morph
 - **Push constants** drive `w_morph` (0 = flat arcade, 1 = full 4D) and `w_slice` (cross-section offset)
-- Retro style presets: `Galaga`, `GeometryWars`, `DeathTank` — palette and glow behaviour differ per style
+- Retro style presets: `Galaga`, `GeometryCore`, `DeathTank` — palette and glow behaviour differ per style
 
 ### 8. Spherical harmonics lighting (PRT / IBL / light probes)
 
@@ -187,7 +187,7 @@ Validation layers are enabled by default when available.
 Retro style at runtime:
 
 ```cpp
-engine.set_retro_style(kengine::RetroStyle::GeometryWars);
+engine.set_retro_style(kengine::RetroStyle::GeometryCore);
 ```
 
 ---

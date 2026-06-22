@@ -34,7 +34,7 @@ struct RetroPushConstants {
     float viewport[2];
     float scanline_strength;
     float pixel_snap;
-    float palette_index;  /* 0=Galaga, 1=GeometryWars, 2=DeathTank */
+    float palette_index;  /* 0=Galaga, 1=GeometryCore, 2=DeathTank */
     float _pad;
 };
 

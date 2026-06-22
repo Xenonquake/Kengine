@@ -13,7 +13,7 @@ int main() {
     config.frame_graph.enable_sharpen = true;
 
     kengine::Engine engine(config);
-    engine.set_retro_style(kengine::RetroStyle::GeometryWars);
+    engine.set_retro_style(kengine::RetroStyle::GeometryCore);
     if (!engine.init()) {
         std::cerr << "Failed to initialize Kengine\n";
         return 1;

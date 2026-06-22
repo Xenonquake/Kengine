@@ -4,12 +4,12 @@ namespace kengine {
 
 enum class RetroStyle {
     Galaga,
-    GeometryWars,
+    GeometryCore,
     DeathTank,
 };
 
 struct RetroVisualState {
-    RetroStyle style            = RetroStyle::GeometryWars;
+    RetroStyle style            = RetroStyle::GeometryCore;
     float w_morph               = 0.0f;
     float w_slice               = 0.0f;
     float glow_intensity        = 1.5f;

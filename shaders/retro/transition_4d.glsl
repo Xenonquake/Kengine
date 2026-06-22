@@ -70,7 +70,7 @@ vec3 retro_palette(float idx, float palette_index) {
         );
         return cols[int(mod(idx, 4.0))];
     }
-    // Geometry Wars: neon
+    // GeometryCore: neon
     vec3 cols[4] = vec3[](
         vec3(0.0, 1.0, 0.8),
         vec3(1.0, 0.1, 0.6),
