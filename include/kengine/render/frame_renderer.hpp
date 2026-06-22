@@ -25,6 +25,7 @@ public:
 
     bool needs_resize(vk::Extent2D extent) const;
     void on_resize(vk::Extent2D extent);
+    void recreate_swapchain_sync();  // recreate per-image semaphores/fences when swapchain image count changes
 
 private:
     void create_sync_objects();
@@ -51,9 +52,15 @@ private:
     vk::Extent2D last_extent_{};
 
     std::uint32_t frames_in_flight_;
+    std::uint32_t swapchain_image_count_ = 0;
 
-    std::vector<vk::raii::Semaphore> image_available_;
-    std::vector<vk::raii::Semaphore> render_finished_;
+    // Acquire semaphores are indexed by frame-in-flight (used for acquire + submit wait)
+    std::vector<vk::raii::Semaphore> acquire_semaphores_;
+    // Render finished / present semaphores indexed by swapchain image (per-image to avoid reuse issues)
+    std::vector<vk::raii::Semaphore> render_finished_semaphores_;
+    // Present fences (via VK_KHR_swapchain_maintenance1) also per swapchain image
+    std::vector<vk::raii::Fence> present_fences_;
+    // CPU fences for command buffer reuse, indexed by frame-in-flight
     std::vector<vk::raii::Fence> in_flight_;
     std::vector<vk::raii::CommandBuffer> command_buffers_;
 

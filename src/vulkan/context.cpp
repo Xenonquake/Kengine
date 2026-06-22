@@ -179,18 +179,40 @@ void VulkanContext::create_device() {
     features13.synchronization2 = VK_TRUE;
     features2.pNext             = &features13;
 
-    const char* extensions[] = {
+    // Note: VK_KHR_swapchain_maintenance1 + surface_maintenance1 are requested below.
+    // Full feature structs are omitted here for header compatibility; when available
+    // they can be chained to enable present fences etc.
+
+    // Base required extensions
+    std::vector<const char*> device_extensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
         VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
     };
 
+    // Query supported extensions so we can optionally enable newer ones like swapchain_maintenance1
+    auto available_exts = physical_device_->enumerateDeviceExtensionProperties();
+    auto has_ext = [&](const char* name) {
+        return std::any_of(available_exts.begin(), available_exts.end(),
+                           [&](const vk::ExtensionProperties& p) {
+                               return std::strcmp(p.extensionName, name) == 0;
+                           });
+    };
+
+    if (has_ext(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
+        has_ext(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)) {
+        device_extensions.push_back(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
+        device_extensions.push_back(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+        // TODO: when headers + driver fully support, also enable the feature bits and
+        // use VkSwapchainPresentFenceInfoKHR on present for fence-based present sync.
+    }
+
     vk::DeviceCreateInfo dci;
     dci.queueCreateInfoCount = static_cast<std::uint32_t>(queue_infos.size());
     dci.pQueueCreateInfos    = queue_infos.data();
     dci.pNext                = &features2;
-    dci.enabledExtensionCount   = 3;
-    dci.ppEnabledExtensionNames = extensions;
+    dci.enabledExtensionCount   = static_cast<std::uint32_t>(device_extensions.size());
+    dci.ppEnabledExtensionNames = device_extensions.data();
 
     device_         = physical_device_->createDevice(dci);
     graphics_queue_ = vk::raii::Queue{*device_, graphics_family_, 0};

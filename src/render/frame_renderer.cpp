@@ -37,6 +37,25 @@ bool FrameRenderer::needs_resize(vk::Extent2D extent) const {
 
 void FrameRenderer::on_resize(vk::Extent2D extent) {
     last_extent_ = extent;
+    // Recreate per-swapchain-image sync objects in case image count changed
+    recreate_swapchain_sync();
+}
+
+void FrameRenderer::recreate_swapchain_sync() {
+    // Wait to be safe (caller usually does device waitIdle)
+    render_finished_semaphores_.clear();
+    present_fences_.clear();
+
+    swapchain_image_count_ = swapchain_.image_count();
+
+    vk::SemaphoreCreateInfo sem_info;
+    for (std::uint32_t i = 0; i < swapchain_image_count_; ++i) {
+        render_finished_semaphores_.push_back(ctx_.device().createSemaphore(sem_info));
+
+        vk::FenceCreateInfo fence_info;
+        fence_info.flags = vk::FenceCreateFlagBits::eSignaled;
+        present_fences_.push_back(ctx_.device().createFence(fence_info));
+    }
 }
 
 void FrameRenderer::create_sync_objects() {
@@ -44,10 +63,20 @@ void FrameRenderer::create_sync_objects() {
     vk::FenceCreateInfo fence_info;
     fence_info.flags = vk::FenceCreateFlagBits::eSignaled;
 
+    // Per frame-in-flight for acquire + command buffer lifetime
     for (std::uint32_t i = 0; i < frames_in_flight_; ++i) {
-        image_available_.push_back(ctx_.device().createSemaphore(sem_info));
-        render_finished_.push_back(ctx_.device().createSemaphore(sem_info));
+        acquire_semaphores_.push_back(ctx_.device().createSemaphore(sem_info));
         in_flight_.push_back(ctx_.device().createFence(fence_info));
+    }
+
+    // Per swapchain image (for present side + maintenance1)
+    swapchain_image_count_ = swapchain_.image_count();
+    for (std::uint32_t i = 0; i < swapchain_image_count_; ++i) {
+        render_finished_semaphores_.push_back(ctx_.device().createSemaphore(sem_info));
+
+        vk::FenceCreateInfo present_fence_info;
+        present_fence_info.flags = vk::FenceCreateFlagBits::eSignaled;
+        present_fences_.push_back(ctx_.device().createFence(present_fence_info));
     }
 }
 
@@ -284,22 +313,23 @@ void FrameRenderer::record_present_pass(std::uint32_t sync_index,
 }
 
 void FrameRenderer::render_frame(float time, const RetroPipelineState& state, const Camera4D& cam) {
-    const std::uint32_t sync_index = sync_index_;
-    auto& fence = in_flight_[sync_index];
-    auto& cmd   = command_buffers_[sync_index];
+    const std::uint32_t frame = sync_index_;
+    auto& fence = in_flight_[frame];
+    auto& cmd   = command_buffers_[frame];
 
     (void)ctx_.device().waitForFences(*fence, VK_TRUE, UINT64_MAX);
     ctx_.device().resetFences(*fence);
 
+    // Acquire using per-frame acquire semaphore
     auto [result, image_index] = swapchain_.handle().acquireNextImage(
-        UINT64_MAX, *image_available_[sync_index], nullptr);
+        UINT64_MAX, *acquire_semaphores_[frame], nullptr);
 
     if (result == vk::Result::eErrorOutOfDateKHR) return;
 
     pending_time_        = time;
     pending_state_       = state;
     pending_cam_         = cam;
-    active_sync_index_   = sync_index;
+    active_sync_index_   = frame;
     active_image_index_  = image_index;
 
     cmd.reset();
@@ -310,25 +340,30 @@ void FrameRenderer::render_frame(float time, const RetroPipelineState& state, co
     vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
     vk::SubmitInfo submit;
     submit.waitSemaphoreCount   = 1;
-    submit.pWaitSemaphores      = &*image_available_[sync_index];
+    submit.pWaitSemaphores      = &*acquire_semaphores_[frame];
     submit.pWaitDstStageMask    = &wait_stage;
     submit.commandBufferCount   = 1;
     submit.pCommandBuffers      = &*cmd;
+    // Signal the *per-image* render finished semaphore
     submit.signalSemaphoreCount = 1;
-    submit.pSignalSemaphores    = &*render_finished_[sync_index];
+    submit.pSignalSemaphores    = &*render_finished_semaphores_[image_index];
 
     ctx_.graphics_queue().submit(submit, *fence);
 
+    // Present: wait on the per-image semaphore.
+    // (When VK_KHR_swapchain_maintenance1 is enabled and supported we can also attach
+    //  VkSwapchainPresentFenceInfoKHR with a per-image fence for cleaner present sync.)
     vk::PresentInfoKHR present;
     present.waitSemaphoreCount = 1;
-    present.pWaitSemaphores    = &*render_finished_[sync_index];
+    present.pWaitSemaphores    = &*render_finished_semaphores_[image_index];
     present.swapchainCount     = 1;
     auto sc = static_cast<vk::SwapchainKHR>(*swapchain_.handle());
     present.pSwapchains        = &sc;
     present.pImageIndices      = &image_index;
+
     (void)ctx_.present_queue().presentKHR(present);
 
-    sync_index_ = (sync_index + 1) % frames_in_flight_;
+    sync_index_ = (frame + 1) % frames_in_flight_;
 }
 
 } // namespace kengine

@@ -19,6 +19,7 @@ public:
     const std::vector<vk::Image>& images() const { return images_; }
     vk::Image image(std::uint32_t index) const { return images_[index]; }
     const vk::raii::SwapchainKHR& handle() const { return *swapchain_; }
+    std::uint32_t image_count() const { return static_cast<std::uint32_t>(images_.size()); }
     const vk::raii::SurfaceKHR& surface() const { return surface_; }
 
 private:
