@@ -16,6 +16,7 @@ void SceneTargetSet::recreate(vk::Extent2D extent) {
     color_desc.format = kSceneColorFormat;
     color_desc.usage  = vk::ImageUsageFlagBits::eColorAttachment
                       | vk::ImageUsageFlagBits::eSampled
+                      | vk::ImageUsageFlagBits::eStorage
                       | vk::ImageUsageFlagBits::eTransferSrc;
     color_desc.aspect = vk::ImageAspectFlagBits::eColor;
 

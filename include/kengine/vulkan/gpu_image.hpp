@@ -8,7 +8,7 @@ namespace kengine {
 
 struct GpuImageDesc {
     vk::Extent2D extent{};
-    vk::Format   format       = vk::Format::eR16G16B16A16Sfloat;
+    vk::Format   format       = vk::Format::eR8G8B8A8Unorm;
     vk::ImageUsageFlags usage = vk::ImageUsageFlagBits::eColorAttachment
                               | vk::ImageUsageFlagBits::eSampled
                               | vk::ImageUsageFlagBits::eTransferSrc;

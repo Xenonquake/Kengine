@@ -22,7 +22,7 @@ public:
     vk::Extent2D extent() const { return extent_; }
     std::uint32_t count() const { return static_cast<std::uint32_t>(frames_.size()); }
 
-    static constexpr vk::Format kSceneColorFormat = vk::Format::eR16G16B16A16Sfloat;
+    static constexpr vk::Format kSceneColorFormat = vk::Format::eR8G8B8A8Unorm;
     static constexpr vk::Format kSceneDepthFormat = vk::Format::eD32Sfloat;
 
 private:

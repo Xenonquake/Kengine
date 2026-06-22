@@ -6,7 +6,7 @@ A modular C/C++ graphics engine prototype built around Vulkan, designed to trans
 
 Kengine explores how classic arcade aesthetics (Galaga, Geometry Wars, Death Tank) can be reimagined when gameplay and rendering operate in **4D space**, with smooth visual transitions between flat 2D projection and full 4D stereographic projection.
 
-The focus is on maximizing core rendering features — bloom-ready HDR, depth, multithreading hooks, RAII resource management, spherical harmonics lighting — rather than advanced features like ray tracing.
+The focus is on maximizing core rendering features — basic Full HD output, depth, multithreading hooks, RAII resource management, spherical harmonics lighting — rather than advanced features like ray tracing.
 
 ---
 
@@ -61,7 +61,7 @@ geometry → [bloom] → [dof] → [taa] → [sharpen] → present
 - **VMA** sub-allocation — no per-resource `vkAllocateMemory`
 - `GpuImage` RAII wrapper with `eSampled` usage reserved for future texture/bindless work
 - Scene targets recreated on window resize
-- Dedicated HDR color + depth images per frame in flight
+- Dedicated color + depth images per frame in flight (basic 8-bit Unorm)
 
 ### 7. 4D space and retro visual transition
 
@@ -89,7 +89,7 @@ geometry → [bloom] → [dof] → [taa] → [sharpen] → present
 ```mermaid
 flowchart LR
     subgraph scene [Offscreen Scene]
-        A[HDR Color R16F] --> B[Depth D32]
+        A[Color R8G8B8A8] --> B[Depth D32]
         C[RetroComposite] --> D[Sprite4D depth-tested]
         D --> E[VectorGlow additive]
     end
@@ -105,7 +105,7 @@ flowchart LR
 
 | Stage | Format | Notes |
 |-------|--------|-------|
-| Scene color | `R16G16B16A16_SFLOAT` | HDR headroom for future bloom |
+| Scene color | `R8G8B8A8_UNORM` | basic LDR for robustness |
 | Scene depth | `D32_SFLOAT` | 4D entity layering via projected Z |
 | Swapchain | `B8G8R8A8_SRGB` | Tonemapped present pass |
 
@@ -197,9 +197,9 @@ engine.set_retro_style(kengine::RetroStyle::GeometryWars);
 ### Working now
 
 - [x] Vulkan 1.3 instance/device with dynamic rendering
-- [x] HDR offscreen scene targets + D32 depth
+- [x] basic Full HD (8-bit) offscreen scene targets + D32 depth
 - [x] Retro/4D sprite pipelines with animated `w_morph`
-- [x] Tonemap present pass (HDR → swapchain)
+- [x] Tonemap present pass (scene → swapchain)
 - [x] Persistent GPU pipeline cache
 - [x] ECS registry with 4D transform components
 - [x] C23 SH projection (CPU bake)

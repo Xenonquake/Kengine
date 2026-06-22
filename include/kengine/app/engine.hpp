@@ -22,8 +22,8 @@
 namespace kengine {
 
 struct EngineConfig {
-    int window_width  = 1280;
-    int window_height = 720;
+    int window_width  = 1476;
+    int window_height = 830;
     const char* title = "Kengine";
     bool vsync        = true;
     FrameGraphConfig frame_graph;
@@ -66,6 +66,11 @@ private:
     Camera4D camera_;
     float anim_time_ = 0.0f;
     bool running_ = false;
+
+    // Demo: Space Invaders style ship at bottom + basic L/R/U/D controls
+    float ship_x_ = 0.0f;
+    float ship_y_ = -0.65f;
+    float ship_speed_ = 1.4f;
 };
 
 } // namespace kengine

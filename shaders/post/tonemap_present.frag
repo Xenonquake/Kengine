@@ -5,6 +5,7 @@ layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform sampler2D sceneColor;
 layout(set = 0, binding = 1) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 2) uniform sampler2D bloomTex;  // for bloom composite
 
 layout(push_constant) uniform PC {
     float exposure;
@@ -23,10 +24,12 @@ vec3 aces_tonemap(vec3 x) {
 }
 
 void main() {
-    vec3 hdr = texture(sceneColor, vUV).rgb * pc.exposure;
-    vec3 ldr = aces_tonemap(hdr);
+    vec3 scene = texture(sceneColor, vUV).rgb;
+    vec3 bloom = texture(bloomTex, vUV).rgb * 0.8;  // bloom strength (additive composite)
+    vec3 color = (scene + bloom) * pc.exposure;
+    vec3 ldr = aces_tonemap(color);
 
-    float scan = 1.0 - pc.scanline_strength * abs(sin(vUV.y * 720.0 * 3.14159));
+    float scan = 1.0 - pc.scanline_strength * abs(sin(vUV.y * 1080.0 * 3.14159));
     ldr *= scan;
 
     float fringe = smoothstep(0.3, 0.7, pc.w_morph) * 0.08;

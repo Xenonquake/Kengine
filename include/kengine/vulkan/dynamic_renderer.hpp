@@ -43,6 +43,12 @@ public:
     static void transition_to_present(
         const vk::raii::CommandBuffer& cmd, vk::Image image);
 
+    // For compute storage images (bloom etc.)
+    static void transition_to_storage_general(
+        const vk::raii::CommandBuffer& cmd, vk::Image image);
+    static void transition_storage_to_shader_read(
+        const vk::raii::CommandBuffer& cmd, vk::Image image);
+
     /* Legacy alias */
     static void transition_to_color_attachment(
         const vk::raii::CommandBuffer& cmd, vk::Image image) {

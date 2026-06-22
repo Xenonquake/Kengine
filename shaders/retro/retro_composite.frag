@@ -47,27 +47,8 @@ void main() {
     vec2 uv = vUV;
     vec3 bg = space_bg(uv);
 
-    // Subtle procedural "4D cross-section" rings (space/neon feel, now on pure black)
-    float rings = 0.0;
-    for (int i = 0; i < 4; ++i) {
-        float fi = float(i);
-        vec2 center = vec2(0.5) + 0.15 * vec2(
-            sin(pc.time * 0.5 + fi + pc.hyper_rot.x),
-            cos(pc.time * 0.7 + fi + pc.hyper_rot.y)
-        );
-        float r = 0.08 + 0.02 * fi + 0.05 * pc.w_morph;
-        float d = abs(length(uv - center) - r);
-        rings += exp(-d * 80.0) * (0.6 + 0.4 * sin(pc.time * 3.0 + fi));
-    }
-
-    vec3 neon = vec3(0.0, 1.0, 0.85) * rings * pc.glow_intensity;
     float scan = 1.0 - pc.scanline_strength * abs(sin(uv.y * pc.viewport.y * 3.14159));
-    vec3 col = (bg + neon) * scan;
-
-    // CRT chromatic fringe at 4D transition boundary
-    float fringe = smoothstep(0.3, 0.7, pc.w_morph) * 0.15;
-    col.r += fringe * sin(uv.x * 200.0 + pc.time * 5.0);
-    col.b -= fringe * sin(uv.x * 200.0 + pc.time * 5.0);
+    vec3 col = bg * scan;
 
     outColor = vec4(col, 1.0);
 }

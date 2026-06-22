@@ -75,7 +75,7 @@ bool Engine::init() {
         body.mass     = 1.0f;
         physics_->add_body(body);
 
-        std::cout << "Kengine: HDR offscreen + depth + pipeline cache ready\n";
+        std::cout << "Kengine: basic Full HD offscreen + depth + pipeline cache ready\n";
         return true;
     } catch (const std::exception& e) {
         std::cerr << "Engine init failed: " << e.what() << '\n';
@@ -126,36 +126,33 @@ void Engine::shutdown() {
 void Engine::update(float dt) {
     anim_time_ += dt;
 
-    // Camera controls (WASD + QE for 3D strafe, ZX for w_slice, UIOP for hyper rots)
     GLFWwindow* win = vulkan_ ? vulkan_->window() : nullptr;
+
+    // Fix camera for Space Invaders bottom view + flying stars (no 4D fwd/back)
+    camera_.eye[0] = 0.0f;
+    camera_.eye[1] = 0.15f;
+    camera_.eye[2] = 3.2f;
+    camera_.target[0] = 0.0f;
+    camera_.target[1] = -0.3f;
+    camera_.target[2] = 0.0f;
+    camera_.w_slice = 0.0f;
+    std::fill(std::begin(camera_.hyper_rot), std::end(camera_.hyper_rot), 0.0f);
+
+    // Basic left/right/up/down ship controls (Space Invaders style at bottom)
     if (win) {
-        float move = camera_.move_speed * dt;
-        float rot  = camera_.rot_speed * dt;
-        float sl   = camera_.slice_speed * dt;
+        float move = ship_speed_ * dt;
+        if (glfwGetKey(win, GLFW_KEY_LEFT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) ship_x_ -= move;
+        if (glfwGetKey(win, GLFW_KEY_RIGHT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) ship_x_ += move;
+        if (glfwGetKey(win, GLFW_KEY_UP) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) ship_y_ += move * 0.6f;
+        if (glfwGetKey(win, GLFW_KEY_DOWN) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) ship_y_ -= move * 0.6f;
 
-        if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) camera_.move(0, 0, -move);
-        if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) camera_.move(0, 0,  move);
-        if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) camera_.move(-move, 0, 0);
-        if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) camera_.move( move, 0, 0);
-        if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) camera_.move(0,  move, 0);
-        if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) camera_.move(0, -move, 0);
-
-        if (glfwGetKey(win, GLFW_KEY_Z) == GLFW_PRESS) camera_.adjust_slice(-sl);
-        if (glfwGetKey(win, GLFW_KEY_X) == GLFW_PRESS) camera_.adjust_slice( sl);
-
-        if (glfwGetKey(win, GLFW_KEY_U) == GLFW_PRESS) camera_.adjust_hyper(0,  rot);
-        if (glfwGetKey(win, GLFW_KEY_I) == GLFW_PRESS) camera_.adjust_hyper(0, -rot);
-        if (glfwGetKey(win, GLFW_KEY_O) == GLFW_PRESS) camera_.adjust_hyper(1,  rot);
-        if (glfwGetKey(win, GLFW_KEY_P) == GLFW_PRESS) camera_.adjust_hyper(1, -rot);
-
-        if (glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS) camera_.reset();
+        // clamp roughly to view
+        ship_x_ = std::max(-0.82f, std::min(0.82f, ship_x_));
+        ship_y_ = std::max(-0.82f, std::min(-0.25f, ship_y_));
     }
 
-    // Demo animation of w params; camera drives 4D slice/rot
-    retro_state_.w_morph = 0.5f + 0.5f * sinf(anim_time_ * 0.4f);
-    // light idle wobble on slice if user hasn't touched it much (camera is authoritative)
-    camera_.w_slice = camera_.w_slice * 0.98f + sinf(anim_time_ * 0.25f) * 0.02f; // gentle
-    retro_state_.w_slice = camera_.w_slice;
+    retro_state_.w_morph = 0.15f;  // mild perspective for depth feel, no heavy 4D
+    retro_state_.w_slice = 0.0f;
 
     physics_->step(dt);
 
@@ -176,6 +173,7 @@ void Engine::render() {
         frame_renderer_->on_resize(extent);
     }
 
+    frame_renderer_->set_ship_position(ship_x_, ship_y_);
     frame_renderer_->render_frame(anim_time_, retro_state_, camera_);
 }
 

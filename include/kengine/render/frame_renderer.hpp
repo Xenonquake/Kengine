@@ -27,11 +27,14 @@ public:
     void on_resize(vk::Extent2D extent);
     void recreate_swapchain_sync();  // recreate per-image semaphores/fences when swapchain image count changes
 
+    void set_ship_position(float x, float y) { ship_x_ = x; ship_y_ = y; }
+
 private:
     void create_sync_objects();
     void create_command_buffers();
     void create_geometry_buffers();
     void update_ship_geometry(float time);
+    void update_moving_stars(float dt);
     void record_scene_pass(std::uint32_t sync_index, float time,
                            const RetroPipelineState& state, const Camera4D& cam);
     void record_present_pass(std::uint32_t sync_index, std::uint32_t image_index,
@@ -74,6 +77,18 @@ private:
 
     // CPU-side ship shape base (rebuilt each update)
     std::vector<RetroVertex4D> ship_base_shape_;
+
+    float ship_x_ = 0.0f;
+    float ship_y_ = -0.65f;
+
+    struct MovingStar {
+        float base_x, base_y;
+        float depth; // negative = far, increases towards camera
+        float speed;
+        float size;
+        std::uint32_t color;
+    };
+    std::vector<MovingStar> moving_stars_;
 };
 
 } // namespace kengine

@@ -121,4 +121,26 @@ void DynamicRenderer::transition_to_present(
         vk::ImageLayout::ePresentSrcKHR);
 }
 
+void DynamicRenderer::transition_to_storage_general(
+    const vk::raii::CommandBuffer& cmd, vk::Image image) {
+    image_barrier(cmd, image, vk::ImageAspectFlagBits::eColor,
+        vk::PipelineStageFlagBits2::eAllCommands,
+        vk::PipelineStageFlagBits2::eComputeShader,
+        vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eShaderRead,
+        vk::ImageLayout::eUndefined,   // don't care previous for post passes
+        vk::ImageLayout::eGeneral);
+}
+
+void DynamicRenderer::transition_storage_to_shader_read(
+    const vk::raii::CommandBuffer& cmd, vk::Image image) {
+    image_barrier(cmd, image, vk::ImageAspectFlagBits::eColor,
+        vk::PipelineStageFlagBits2::eAllCommands,
+        vk::PipelineStageFlagBits2::eFragmentShader,
+        vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eShaderWrite,
+        vk::AccessFlagBits2::eShaderRead,
+        vk::ImageLayout::eUndefined,
+        vk::ImageLayout::eShaderReadOnlyOptimal);
+}
+
 } // namespace kengine

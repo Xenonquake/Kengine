@@ -15,6 +15,7 @@ FrameRenderer::FrameRenderer(VulkanContext& ctx, Swapchain& swapchain,
     create_command_buffers();
     create_geometry_buffers();
     last_extent_ = swapchain.extent();
+    post_.on_resize(last_extent_);
 }
 
 FrameRenderer::~FrameRenderer() {
@@ -25,6 +26,12 @@ void FrameRenderer::bind_frame_graph_passes() {
     frame_graph_.set_pass_execute("geometry", [this]() {
         record_scene_pass(active_sync_index_, pending_time_, pending_state_, pending_cam_);
     });
+
+    // Bloom now executed manually inside geometry pass for correct command buffer state.
+    // (graph passes left for future when full post recording is restructured)
+    // frame_graph_.set_pass_execute("bloom_threshold", ...);
+    // frame_graph_.set_pass_execute("bloom_blur", ...);
+
     frame_graph_.set_pass_execute("present", [this]() {
         record_present_pass(active_sync_index_, active_image_index_,
                            pending_time_, pending_state_);
@@ -39,6 +46,7 @@ void FrameRenderer::on_resize(vk::Extent2D extent) {
     last_extent_ = extent;
     // Recreate per-swapchain-image sync objects in case image count changed
     recreate_swapchain_sync();
+    post_.on_resize(extent);
 }
 
 void FrameRenderer::recreate_swapchain_sync() {
@@ -142,56 +150,52 @@ static std::vector<RetroVertex4D> make_sprite_quad(float x, float y, float z, fl
 }
 
 void FrameRenderer::create_geometry_buffers() {
-    // --- Stars and rocks as Sprite4D (small quads in 4D) ---
-    std::vector<RetroVertex4D> sprite_verts;
-    // Stars (background, small, various w)
-    for (int i = 0; i < 18; ++i) {
-        float t = i * 1.7f;
-        float x = sinf(t * 0.7f) * (1.8f + (i % 3) * 0.6f);
-        float y = cosf(t * 1.1f) * (1.0f + (i % 2) * 0.8f);
-        float z = -1.5f - (i % 5) * 0.8f;
-        float w = sinf(t * 0.4f) * 1.2f;
-        float s = 0.018f + (i % 4) * 0.004f;
-        std::uint32_t col = (i % 3 == 0) ? 0xFFFFFF88u : 0xFFCCEEFFu;
-        auto q = make_sprite_quad(x, y, z, w, s, s, col);
-        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
-    }
-    // Rocks (mid/fg, chunkier)
-    for (int i = 0; i < 7; ++i) {
-        float t = i * 2.3f + 0.5f;
-        float x = cosf(t) * (2.2f - i * 0.15f);
-        float y = sinf(t * 0.8f) * 1.6f - 0.4f;
-        float z = 0.2f + (i % 3) * 0.6f;
-        float w = cosf(t * 0.9f) * 0.8f - 0.3f;
-        float s = 0.09f + ((i + 2) % 3) * 0.025f;
-        std::uint32_t col = (i % 2 == 0) ? 0xFF88AACCu : 0xFF66BB99u;
-        auto q = make_sprite_quad(x, y, z, w, s, s * 0.7f, col);
-        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    // --- Moving stars for flying-through-space effect (small sprites coming towards viewer) ---
+    moving_stars_.clear();
+    for (int i = 0; i < 60; ++i) {
+        float r1 = (i * 0.37f);
+        float r2 = (i * 0.73f);
+        MovingStar s;
+        s.base_x = sinf(r1) * (0.9f + (i % 5) * 0.1f);
+        s.base_y = cosf(r2) * 0.9f;
+        s.depth = -2.5f - (i % 7) * 0.3f; // far negative
+        s.speed = 1.8f + (i % 4) * 0.3f;
+        s.size = 0.012f + (i % 3) * 0.003f;
+        s.color = (i % 4 == 0) ? 0xFFFFFFCCu : 0xFFDDDDFFu;
+        moving_stars_.push_back(s);
     }
 
-    sprite_vertex_count_ = static_cast<std::uint32_t>(sprite_verts.size());
-    vk::DeviceSize sprite_size = sizeof(RetroVertex4D) * sprite_verts.size();
+    // initial build of sprite buffer (will be updated every frame)
+    std::vector<RetroVertex4D> initial_sprites;
+    for (auto& s : moving_stars_) {
+        float z = s.depth;
+        auto q = make_sprite_quad(s.base_x, s.base_y, z, 0.0f, s.size, s.size, s.color);
+        initial_sprites.insert(initial_sprites.end(), q.begin(), q.end());
+    }
+    // room for exhaust trail quads (5*6 = 30 verts)
+    initial_sprites.resize(initial_sprites.size() + 30);
+
+    sprite_vertex_count_ = static_cast<std::uint32_t>(initial_sprites.size());
+    vk::DeviceSize sprite_size = sizeof(RetroVertex4D) * initial_sprites.size();
 
     sprite_vertex_buffer_ = create_vb(ctx_.device(), sprite_size);
     sprite_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), sprite_vertex_buffer_);
-    upload_host_buffer(sprite_vertex_memory_, sprite_verts.data(), sprite_size);
+    upload_host_buffer(sprite_vertex_memory_, initial_sprites.data(), sprite_size);
 
-    // --- Vector ship (LineStrip via VectorGlow) base shape (will be transformed each frame) ---
-    // Simple classic vector ship pointing up, centered near origin
+    // --- Vector ship at bottom (Space Invaders style) ---
     ship_base_shape_ = {
-        {{ 0.00f,  0.18f, 0.02f, 0.05f}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // nose
-        {{-0.12f, -0.08f, 0.01f, 0.04f}, {0.0f, 1.0f}, 0xFFEEFFFFu}, // left wing
-        {{-0.04f, -0.02f, 0.00f, 0.03f}, {0.25f, 0.6f}, 0xFFCCEEFFu},
-        {{ 0.04f, -0.02f, 0.00f, 0.03f}, {0.75f, 0.6f}, 0xFFCCEEFFu},
-        {{ 0.12f, -0.08f, 0.01f, 0.04f}, {1.0f, 1.0f}, 0xFFEEFFFFu}, // right wing
-        {{ 0.00f,  0.18f, 0.02f, 0.05f}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // close nose
+        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // nose top
+        {{-0.08f, -0.02f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0xFFCCFFFFu},
+        {{-0.04f, -0.06f, 0.0f, 0.0f}, {0.25f, 0.6f}, 0xFFAAEEFFu},
+        {{ 0.04f, -0.06f, 0.0f, 0.0f}, {0.75f, 0.6f}, 0xFFAAEEFFu},
+        {{ 0.08f, -0.02f, 0.0f, 0.0f}, {1.0f, 1.0f}, 0xFFCCFFFFu},
+        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0.5f, 0.0f}, 0xFFFFFFFFu},
     };
     ship_vertex_count_ = static_cast<std::uint32_t>(ship_base_shape_.size());
 
     vk::DeviceSize ship_size = sizeof(RetroVertex4D) * ship_base_shape_.size();
     ship_vertex_buffer_ = create_vb(ctx_.device(), ship_size);
     ship_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), ship_vertex_buffer_);
-    // initial upload (will be overwritten on first update)
     upload_host_buffer(ship_vertex_memory_, ship_base_shape_.data(), ship_size);
 }
 
@@ -214,24 +218,61 @@ static RetroVertex4D transform_ship_vert(const RetroVertex4D& base, float cx, fl
 void FrameRenderer::update_ship_geometry(float time) {
     if (ship_base_shape_.empty() || ship_vertex_count_ == 0) return;
 
-    // Zig zag ship in foreground: figure-8-ish path near viewer
-    float phase = time * 1.6f;
-    float zig_x = sinf(phase) * 1.6f + sinf(phase * 2.3f) * 0.4f;
-    float zig_y = cosf(phase * 0.7f) * 0.9f - 0.3f;
-    float zig_z = 2.4f + sinf(phase * 1.1f) * 0.25f; // closer
-    float zig_w = sinf(phase * 0.4f) * 0.35f + 0.05f;
-
-    float yaw   = sinf(phase * 1.3f) * 0.6f + sinf(phase) * 0.2f;
-    float pw    = sinf(phase * 2.0f) * 1.2f;
+    // Ship fixed at bottom (Space Invaders style), controlled by input
+    // No 4D forward/back
+    float ship_z = 1.6f;
+    float ship_w = 0.05f;
+    float yaw = 0.0f;  // always pointing up
 
     std::vector<RetroVertex4D> live(ship_base_shape_.size());
     for (size_t i = 0; i < live.size(); ++i) {
-        live[i] = transform_ship_vert(ship_base_shape_[i], zig_x, zig_y, zig_z, zig_w, yaw, pw);
+        live[i] = transform_ship_vert(ship_base_shape_[i], ship_x_, ship_y_, ship_z, ship_w, yaw, 0.0f);
     }
 
     vk::DeviceSize sz = sizeof(RetroVertex4D) * live.size();
     upload_host_buffer(ship_vertex_memory_, live.data(), sz);
     ship_vertex_count_ = static_cast<std::uint32_t>(live.size());
+}
+
+void FrameRenderer::update_moving_stars(float dt) {
+    if (moving_stars_.empty()) return;
+
+    std::vector<RetroVertex4D> sprite_verts;
+
+    for (auto& s : moving_stars_) {
+        s.depth += s.speed * dt;
+        if (s.depth > 1.8f) {
+            // respawn far away, random lateral position
+            s.depth = -2.8f - (rand() % 5) * 0.15f;
+            s.base_x = ((rand() % 2000) / 1000.0f - 1.0f) * 0.95f;
+            s.base_y = ((rand() % 2000) / 1000.0f - 1.0f) * 0.7f;
+        }
+        float sz = s.size * (1.0f + (s.depth + 2.8f) * 0.4f); // grow as it approaches
+        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color);
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+
+    // Add simple exhaust trail behind ship for bloom simulation (bright points)
+    float exhaust_y = ship_y_ - 0.18f;
+    for (int e = 0; e < 5; ++e) {
+        float ex = ship_x_ + (e - 2) * 0.015f * (1.0f + e * 0.2f);
+        float ey = exhaust_y - e * 0.035f;
+        float ez = 1.55f - e * 0.02f;
+        float es = 0.022f - e * 0.002f;
+        if (es < 0.005f) es = 0.005f;
+        std::uint32_t ecol = (e < 2) ? 0xFFFFFFFFu : 0xFFEEFFFFu;
+        auto q = make_sprite_quad(ex, ey, ez, 0.0f, es, es * 0.7f, ecol);
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+
+    // pad if needed
+    while (sprite_verts.size() < sprite_vertex_count_) {
+        sprite_verts.push_back({{0,0,0,0}, {0,0}, 0});
+    }
+    if (sprite_verts.size() > sprite_vertex_count_) sprite_verts.resize(sprite_vertex_count_);
+
+    vk::DeviceSize sz = sizeof(RetroVertex4D) * sprite_verts.size();
+    upload_host_buffer(sprite_vertex_memory_, sprite_verts.data(), sz);
 }
 
 void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
@@ -267,32 +308,121 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     pipelines_.push_scene_state(cmd, RetroPipelineKind::RetroComposite, pc);
     cmd.draw(3, 1, 0, 0);
 
-    // Update animated ship verts (zig zagging foreground vector ship)
+    // Update moving stars (coming towards perspective) and ship trail
+    static float last_t = time;
+    float dt = time - last_t;
+    if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
+    last_t = time;
+    update_moving_stars(dt);
+
+    // Update ship position (Space Invaders bottom style)
     update_ship_geometry(time);
 
-    // Stars + rocks
+    // Stars + exhaust (bright for bloom trail)
     pipelines_.bind_scene(cmd, RetroPipelineKind::Sprite4D);
     pipelines_.push_scene_state(cmd, RetroPipelineKind::Sprite4D, pc);
     vk::DeviceSize off = 0;
     cmd.bindVertexBuffers(0, *sprite_vertex_buffer_, off);
     cmd.draw(sprite_vertex_count_, 1, 0, 0);
 
-    // Vector line ship
-    if (state.style == RetroStyle::GeometryWars || state.w_morph > 0.1f) {
-        pipelines_.bind_scene(cmd, RetroPipelineKind::VectorGlow);
-        pipelines_.push_scene_state(cmd, RetroPipelineKind::VectorGlow, pc);
-        cmd.bindVertexBuffers(0, *ship_vertex_buffer_, off);
-        cmd.draw(ship_vertex_count_, 1, 0, 0);
-    }
+    // Vector line ship (no rocks)
+    pipelines_.bind_scene(cmd, RetroPipelineKind::VectorGlow);
+    pipelines_.push_scene_state(cmd, RetroPipelineKind::VectorGlow, pc);
+    cmd.bindVertexBuffers(0, *ship_vertex_buffer_, off);
+    cmd.draw(ship_vertex_count_, 1, 0, 0);
 
     DynamicRenderer::end(cmd);
 
-    DynamicRenderer::transition_color_to_shader_read(cmd, targets.color.image());
+    // Feed the rendered scene into bloom input for post processing passes
+    if (post_.bloom_input().valid()) {
+        // Transition scene to transfer src for the copy (bloom to dst)
+        {
+            vk::ImageMemoryBarrier2 bar{};
+            bar.image = targets.color.image();
+            bar.srcStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+            bar.dstStageMask = vk::PipelineStageFlagBits2::eTransfer;
+            bar.srcAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite;
+            bar.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
+            bar.oldLayout = vk::ImageLayout::eColorAttachmentOptimal;
+            bar.newLayout = vk::ImageLayout::eTransferSrcOptimal;
+            bar.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            vk::DependencyInfo dep{};
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &bar;
+            cmd.pipelineBarrier2(dep);
+        }
+
+        // bloom input to transfer dst
+        {
+            vk::ImageMemoryBarrier2 bar{};
+            bar.image = post_.bloom_input().image();
+            bar.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+            bar.dstStageMask = vk::PipelineStageFlagBits2::eTransfer;
+            bar.srcAccessMask = {};
+            bar.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
+            bar.oldLayout = vk::ImageLayout::eUndefined;
+            bar.newLayout = vk::ImageLayout::eTransferDstOptimal;
+            bar.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            vk::DependencyInfo dep{};
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &bar;
+            cmd.pipelineBarrier2(dep);
+        }
+
+        vk::ImageCopy cpy{};
+        cpy.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+        cpy.dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+        cpy.extent = vk::Extent3D{extent.width, extent.height, 1};
+        cmd.copyImage(targets.color.image(), vk::ImageLayout::eTransferSrcOptimal,
+                      post_.bloom_input().image(), vk::ImageLayout::eTransferDstOptimal, cpy);
+
+        // Put scene back to shader read for later use (descriptors, present, dof etc)
+        {
+            vk::ImageMemoryBarrier2 bar{};
+            bar.image = targets.color.image();
+            bar.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;
+            bar.dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader;
+            bar.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
+            bar.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
+            bar.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
+            bar.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+            bar.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            vk::DependencyInfo dep{};
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &bar;
+            cmd.pipelineBarrier2(dep);
+        }
+
+        // Put bloom input to general for compute threshold
+        {
+            vk::ImageMemoryBarrier2 bar{};
+            bar.image = post_.bloom_input().image();
+            bar.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;
+            bar.dstStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+            bar.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
+            bar.dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
+            bar.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+            bar.newLayout = vk::ImageLayout::eGeneral;
+            bar.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+            vk::DependencyInfo dep{};
+            dep.imageMemoryBarrierCount = 1;
+            dep.pImageMemoryBarriers = &bar;
+            cmd.pipelineBarrier2(dep);
+        }
+    }
+
+    // Note: bloom compute temporarily disabled to resolve cb invalid state.
+    // The copy populates bloom_input, which is bound and added in tonemap for visual composite.
+    // TODO: re-enable record_bloom_threshold + blur once command buffer state for mixed render/compute is stable.
+    // post_.record_bloom_threshold(cmd, sync_index, extent);
+    // post_.record_bloom_blur(cmd, sync_index, extent);
+
     DynamicRenderer::transition_depth_to_shader_read(cmd, targets.depth.image());
 
     post_.update_descriptors(sync_index,
         targets.color.view(), targets.color.format(),
-        targets.depth.view());
+        targets.depth.view(),
+        {});  // bloom bound later before present
 }
 
 void FrameRenderer::record_present_pass(std::uint32_t sync_index,
@@ -301,8 +431,37 @@ void FrameRenderer::record_present_pass(std::uint32_t sync_index,
     auto& cmd = command_buffers_[sync_index];
     auto extent = swapchain_.extent();
 
+    auto& scene_targets = pipelines_.scene_targets();
+    auto& scene = scene_targets.frame(sync_index);
+
     auto swapchain_image = swapchain_.image(image_index);
     DynamicRenderer::transition_color_to_attachment(cmd, swapchain_image);
+
+    // Bind bloom for compositing (using the populated input for now; compute will produce proper blurred output later)
+    vk::ImageView bloom_view{};
+    if (post_.bloom_input().valid()) {
+        // Ensure layout for sampling
+        vk::ImageMemoryBarrier2 bar{};
+        bar.image = post_.bloom_input().image();
+        bar.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+        bar.dstStageMask = vk::PipelineStageFlagBits2::eFragmentShader;
+        bar.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+        bar.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
+        bar.oldLayout = vk::ImageLayout::eGeneral;
+        bar.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        bar.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+        vk::DependencyInfo dep{};
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &bar;
+        cmd.pipelineBarrier2(dep);
+
+        bloom_view = post_.bloom_input().view();
+    }
+
+    post_.update_descriptors(sync_index,
+        scene.color.view(), scene.color.format(),
+        scene.depth.view(),
+        bloom_view);
 
     auto tonemap = post_.make_test_tonemap_constants(time, state.w_morph, state.scanline_strength);
 

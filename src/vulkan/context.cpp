@@ -179,6 +179,18 @@ void VulkanContext::create_device() {
     features13.synchronization2 = VK_TRUE;
     features2.pNext             = &features13;
 
+    // Descriptor indexing (bindless) features - chained if extension is available
+    VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures{};
+    descriptorIndexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
+    descriptorIndexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
+    descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount = VK_TRUE;
+
+    // Hook into the chain (note: we attach even if ext not enabled; driver will ignore unsupported)
+    descriptorIndexingFeatures.pNext = features2.pNext;
+    features2.pNext = &descriptorIndexingFeatures;
+
     // Note: VK_KHR_swapchain_maintenance1 + surface_maintenance1 are requested below.
     // Full feature structs are omitted here for header compatibility; when available
     // they can be chained to enable present fences etc.
@@ -205,6 +217,10 @@ void VulkanContext::create_device() {
         device_extensions.push_back(VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
         // TODO: when headers + driver fully support, also enable the feature bits and
         // use VkSwapchainPresentFenceInfoKHR on present for fence-based present sync.
+    }
+
+    if (has_ext(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
+        device_extensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
     }
 
     vk::DeviceCreateInfo dci;
