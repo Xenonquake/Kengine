@@ -97,6 +97,7 @@ add_library(kengine STATIC
     src/render/render_graph.cpp
     src/render/frame_graph.cpp
     src/render/post_process.cpp
+    src/render/texture.cpp
     src/lighting/sh_lighting.cpp
     src/app/engine.cpp
 )
@@ -106,6 +107,7 @@ target_include_directories(kengine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/c_modules/sh
     ${CMAKE_CURRENT_SOURCE_DIR}/c_modules/physics
     ${vma_SOURCE_DIR}/include
+    ${stb_SOURCE_DIR}
 )
 target_link_libraries(kengine PUBLIC
     Vulkan::Vulkan

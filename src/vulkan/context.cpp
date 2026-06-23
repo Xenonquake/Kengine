@@ -186,6 +186,7 @@ void VulkanContext::create_device() {
     descriptorIndexingFeatures.runtimeDescriptorArray = VK_TRUE;
     descriptorIndexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
     descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount = VK_TRUE;
+    descriptorIndexingFeatures.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
 
     // Hook into the chain (note: we attach even if ext not enabled; driver will ignore unsupported)
     descriptorIndexingFeatures.pNext = features2.pNext;

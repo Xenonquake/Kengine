@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Configuration
-DEMO_PATH="${1:-./home/riverdk/projects/git/Vulkan/Kengine/kengine_demo}"  # Default to debug build; pass path as argument
+DEMO_PATH="${1:-./build/kengine_demo}"  # Default to build/ ; pass path as argument if needed
 LOG_DIR="debug_logs"
 VALGRIND_LOG="${LOG_DIR}/valgrind_$(date +%Y%m%d_%H%M%S).log"
 SUPPRESSIONS="valgrind_suppressions.supp"

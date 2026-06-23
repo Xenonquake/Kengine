@@ -3,10 +3,12 @@
 layout(location = 0) in vec2 inPos;
 layout(location = 1) in vec2 inUV;
 layout(location = 2) in uint inColor;
+layout(location = 3) in uint inTexIndex;
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) out float vPaletteIdx;
+layout(location = 3) out uint vTexIndex;
 
 layout(push_constant) uniform PC {
     mat4 mvp;
@@ -28,4 +30,5 @@ void main() {
     vUV = inUV;
     vColor = unpackUnorm4x8(inColor);
     vPaletteIdx = float(inColor & 0xFFu) / 255.0;
+    vTexIndex = inTexIndex;
 }

@@ -72,6 +72,7 @@ void PostProcessPipeline::create_descriptor_resources(std::uint32_t frames_in_fl
     pool_size.descriptorCount = frames_in_flight * 3;
 
     vk::DescriptorPoolCreateInfo pool_info;
+    pool_info.flags         = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
     pool_info.maxSets       = frames_in_flight;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes    = &pool_size;
@@ -274,6 +275,7 @@ void PostProcessPipeline::create_bloom_compute_pipelines() {
         storage_size.descriptorCount = 4;
 
         vk::DescriptorPoolCreateInfo bpool;
+        bpool.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
         bpool.maxSets = 2;
         bpool.poolSizeCount = 1;
         bpool.pPoolSizes = &storage_size;

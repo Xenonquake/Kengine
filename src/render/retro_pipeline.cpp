@@ -24,7 +24,8 @@ static GraphicsPipelineDesc desc_sprite2d(const DynamicRenderingFormats& formats
     d.attributes = {
         {0, 0, vk::Format::eR32G32Sfloat, offsetof(RetroVertex2D, pos)},
         {1, 0, vk::Format::eR32G32Sfloat, offsetof(RetroVertex2D, uv)},
-        {2, 0, vk::Format::eR32Uint,      offsetof(RetroVertex2D, color)}
+        {2, 0, vk::Format::eR32Uint,      offsetof(RetroVertex2D, color)},
+        {3, 0, vk::Format::eR32Uint,      offsetof(RetroVertex2D, texIndex)}
     };
     d.blend = BlendMode::Alpha;
     d.depth_test = false;
@@ -41,7 +42,8 @@ static GraphicsPipelineDesc desc_sprite4d(const DynamicRenderingFormats& formats
     d.attributes = {
         {0, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(RetroVertex4D, pos)},
         {1, 0, vk::Format::eR32G32Sfloat,      offsetof(RetroVertex4D, uv)},
-        {2, 0, vk::Format::eR32Uint,           offsetof(RetroVertex4D, color)}
+        {2, 0, vk::Format::eR32Uint,           offsetof(RetroVertex4D, color)},
+        {3, 0, vk::Format::eR32Uint,           offsetof(RetroVertex4D, texIndex)}
     };
     d.blend = blend;
     d.depth_test = true;
@@ -75,6 +77,8 @@ RetroPipelineSet::RetroPipelineSet(const vk::raii::Device& device, PipelineCache
       shader_composite_frag_(device, spv_path(shader_dir, "retro/retro_composite.frag")),
       shader_fullscreen_vert_(device, spv_path(shader_dir, "common/fullscreen.vert")) {
 
+    createBindlessResources();
+
     const RetroPipelineKind kinds[] = {
         RetroPipelineKind::Sprite2D,
         RetroPipelineKind::Sprite4D,
@@ -85,8 +89,12 @@ RetroPipelineSet::RetroPipelineSet(const vk::raii::Device& device, PipelineCache
     };
 
     for (auto kind : kinds) {
+        std::vector<vk::DescriptorSetLayout> setLayouts;
+        if (bindlessLayout_) {
+            setLayouts.push_back(*bindlessLayout_);
+        }
         layouts_.emplace(kind, GraphicsPipelineBuilder::create_layout(
-            device_, {}, sizeof(RetroPushConstants),
+            device_, setLayouts, sizeof(RetroPushConstants),
             vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment));
         pipelines_.emplace(kind, create_pipeline(kind));
     }
@@ -131,6 +139,82 @@ vk::raii::Pipeline RetroPipelineSet::create_pipeline(RetroPipelineKind kind) {
     }
 
     return GraphicsPipelineBuilder::create(device_, layouts_.at(kind), cache_.handle(), desc);
+}
+
+void RetroPipelineSet::createBindlessResources() {
+    // Create bindless layout for textures (set 0, binding 0)
+    vk::DescriptorSetLayoutBinding bind{};
+    bind.binding = 0;
+    bind.descriptorType = vk::DescriptorType::eCombinedImageSampler;
+    bind.descriptorCount = 1024;
+    bind.stageFlags = vk::ShaderStageFlagBits::eFragment | vk::ShaderStageFlagBits::eVertex;
+    bind.pImmutableSamplers = nullptr;
+
+    vk::DescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+    vk::DescriptorBindingFlags bindFlags = vk::DescriptorBindingFlagBits::ePartiallyBound
+                                         | vk::DescriptorBindingFlagBits::eUpdateAfterBind
+                                         | vk::DescriptorBindingFlagBits::eVariableDescriptorCount;
+    flagsInfo.bindingCount = 1;
+    flagsInfo.pBindingFlags = &bindFlags;
+
+    vk::DescriptorSetLayoutCreateInfo layoutCI{};
+    layoutCI.bindingCount = 1;
+    layoutCI.pBindings = &bind;
+    layoutCI.pNext = &flagsInfo;
+    layoutCI.flags = vk::DescriptorSetLayoutCreateFlagBits::eUpdateAfterBindPool;
+
+    bindlessLayout_ = device_.createDescriptorSetLayout(layoutCI);
+
+    // Pool supporting update after bind + large
+    vk::DescriptorPoolSize poolSize{};
+    poolSize.type = vk::DescriptorType::eCombinedImageSampler;
+    poolSize.descriptorCount = 1024;
+
+    vk::DescriptorPoolCreateInfo poolCI{};
+    poolCI.flags = vk::DescriptorPoolCreateFlagBits::eUpdateAfterBind |
+                   vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
+    poolCI.maxSets = 1;
+    poolCI.poolSizeCount = 1;
+    poolCI.pPoolSizes = &poolSize;
+
+    bindlessPool_ = device_.createDescriptorPool(poolCI);
+
+    // Allocate the set
+    vk::DescriptorSetVariableDescriptorCountAllocateInfo varCount{};
+    uint32_t maxCount = 1024;
+    varCount.descriptorSetCount = 1;
+    varCount.pDescriptorCounts = &maxCount;
+
+    vk::DescriptorSetAllocateInfo allocCI{};
+    allocCI.descriptorPool = *bindlessPool_;
+    allocCI.descriptorSetCount = 1;
+    vk::DescriptorSetLayout rawLayout = *bindlessLayout_;
+    allocCI.pSetLayouts = &rawLayout;
+    allocCI.pNext = &varCount;
+
+    auto sets = device_.allocateDescriptorSets(allocCI);
+    if (!sets.empty()) {
+        bindlessSet_ = std::move(sets[0]);
+    }
+}
+
+void RetroPipelineSet::updateTexture(uint32_t index, vk::ImageView view, vk::Sampler sampler) {
+    if (!bindlessSet_ || index >= 1024) return;
+
+    vk::DescriptorImageInfo imgInfo{};
+    imgInfo.sampler = sampler;
+    imgInfo.imageView = view;
+    imgInfo.imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+
+    vk::WriteDescriptorSet write{};
+    write.dstSet = *bindlessSet_;
+    write.dstBinding = 0;
+    write.dstArrayElement = index;
+    write.descriptorType = vk::DescriptorType::eCombinedImageSampler;
+    write.descriptorCount = 1;
+    write.pImageInfo = &imgInfo;
+
+    device_.updateDescriptorSets({write}, {});
 }
 
 } // namespace kengine

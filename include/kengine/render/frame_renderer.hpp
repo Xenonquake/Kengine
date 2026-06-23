@@ -5,6 +5,7 @@
 #include "kengine/render/pipeline_manager.hpp"
 #include "kengine/render/post_process.hpp"
 #include "kengine/render/retro_pipeline.hpp"
+#include "kengine/render/texture.hpp"
 #include "kengine/vulkan/context.hpp"
 #include "kengine/vulkan/swapchain.hpp"
 #include <cstdint>
@@ -89,6 +90,8 @@ private:
         std::uint32_t color;
     };
     std::vector<MovingStar> moving_stars_;
+
+    std::optional<Texture> demoTexture_;  // for bindless demo on stars
 };
 
 } // namespace kengine

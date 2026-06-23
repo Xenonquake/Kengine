@@ -1,4 +1,5 @@
 #include "kengine/render/frame_renderer.hpp"
+#include "kengine/render/texture.hpp"
 #include "kengine/vulkan/dynamic_renderer.hpp"
 #include <cmath>
 #include <cstring>
@@ -137,20 +138,20 @@ static vk::raii::DeviceMemory alloc_and_bind_host(const vk::raii::Device& dev,
 }
 
 static std::vector<RetroVertex4D> make_sprite_quad(float x, float y, float z, float w,
-                                                   float sx, float sy, std::uint32_t color) {
+                                                   float sx, float sy, std::uint32_t color, std::uint32_t texIndex = 0) {
     // tiny quad as two tris, uv for the sprite shader
     std::vector<RetroVertex4D> q(6);
-    q[0] = {{-sx + x, -sy + y, z, w}, {0, 1}, color};
-    q[1] = {{ sx + x, -sy + y, z, w}, {1, 1}, color};
-    q[2] = {{ sx + x,  sy + y, z, w}, {1, 0}, color};
-    q[3] = {{-sx + x, -sy + y, z, w}, {0, 1}, color};
-    q[4] = {{ sx + x,  sy + y, z, w}, {1, 0}, color};
-    q[5] = {{-sx + x,  sy + y, z, w}, {0, 0}, color};
+    q[0] = {{-sx + x, -sy + y, z, w}, {0, 1}, color, texIndex};
+    q[1] = {{ sx + x, -sy + y, z, w}, {1, 1}, color, texIndex};
+    q[2] = {{ sx + x,  sy + y, z, w}, {1, 0}, color, texIndex};
+    q[3] = {{-sx + x, -sy + y, z, w}, {0, 1}, color, texIndex};
+    q[4] = {{ sx + x,  sy + y, z, w}, {1, 0}, color, texIndex};
+    q[5] = {{-sx + x,  sy + y, z, w}, {0, 0}, color, texIndex};
     return q;
 }
 
 void FrameRenderer::create_geometry_buffers() {
-    // --- Moving stars for flying-through-space effect (small sprites coming towards viewer) ---
+    // --- Moving 2D stars for flying-through-space effect (small sprites coming towards viewer, using 4D flare via ParticleAdditive) ---
     moving_stars_.clear();
     for (int i = 0; i < 60; ++i) {
         float r1 = (i * 0.37f);
@@ -161,7 +162,7 @@ void FrameRenderer::create_geometry_buffers() {
         s.depth = -2.5f - (i % 7) * 0.3f; // far negative
         s.speed = 1.8f + (i % 4) * 0.3f;
         s.size = 0.012f + (i % 3) * 0.003f;
-        s.color = (i % 4 == 0) ? 0xFFFFFFCCu : 0xFFDDDDFFu;
+        s.color = 0xFFFFFFFFu;  // pure white (no neon/purple tint from palette)
         moving_stars_.push_back(s);
     }
 
@@ -169,7 +170,7 @@ void FrameRenderer::create_geometry_buffers() {
     std::vector<RetroVertex4D> initial_sprites;
     for (auto& s : moving_stars_) {
         float z = s.depth;
-        auto q = make_sprite_quad(s.base_x, s.base_y, z, 0.0f, s.size, s.size, s.color);
+        auto q = make_sprite_quad(s.base_x, s.base_y, z, 0.0f, s.size, s.size, s.color, 1);
         initial_sprites.insert(initial_sprites.end(), q.begin(), q.end());
     }
     // room for exhaust trail quads (5*6 = 30 verts)
@@ -197,6 +198,22 @@ void FrameRenderer::create_geometry_buffers() {
     ship_vertex_buffer_ = create_vb(ctx_.device(), ship_size);
     ship_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), ship_vertex_buffer_);
     upload_host_buffer(ship_vertex_memory_, ship_base_shape_.data(), ship_size);
+
+    // Demo texture for bindless (small white 2x2 to test sampling on stars)
+    {
+        uint8_t whiteData[4 * 4] = {
+            255,255,255,255,  255,255,255,255,
+            255,255,255,255,  255,255,255,255
+        };
+        demoTexture_.emplace(ctx_.device(), ctx_.allocator().handle(),
+                             ctx_.graphics_queue(), ctx_.command_pool(),
+                             whiteData, 2, 2);
+    }
+    // Register demo texture at bindless index 1
+    if (demoTexture_) {
+        auto& rs = pipelines_.scene();
+        rs.updateTexture(1, demoTexture_->view(), demoTexture_->sampler());
+    }
 }
 
 static RetroVertex4D transform_ship_vert(const RetroVertex4D& base, float cx, float cy, float cz, float cw,
@@ -248,11 +265,11 @@ void FrameRenderer::update_moving_stars(float dt) {
             s.base_y = ((rand() % 2000) / 1000.0f - 1.0f) * 0.7f;
         }
         float sz = s.size * (1.0f + (s.depth + 2.8f) * 0.4f); // grow as it approaches
-        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color);
+        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color, 1);
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
-    // Add simple exhaust trail behind ship for bloom simulation (bright points)
+    // Add simple exhaust trail behind ship (white + flare; combines with 4D particle effect + post bloom)
     float exhaust_y = ship_y_ - 0.18f;
     for (int e = 0; e < 5; ++e) {
         float ex = ship_x_ + (e - 2) * 0.015f * (1.0f + e * 0.2f);
@@ -261,7 +278,7 @@ void FrameRenderer::update_moving_stars(float dt) {
         float es = 0.022f - e * 0.002f;
         if (es < 0.005f) es = 0.005f;
         std::uint32_t ecol = (e < 2) ? 0xFFFFFFFFu : 0xFFEEFFFFu;
-        auto q = make_sprite_quad(ex, ey, ez, 0.0f, es, es * 0.7f, ecol);
+        auto q = make_sprite_quad(ex, ey, ez, 0.0f, es, es * 0.7f, ecol, 1);
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
@@ -318,9 +335,18 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     // Update ship position (Space Invaders bottom style)
     update_ship_geometry(time);
 
-    // Stars + exhaust (bright for bloom trail)
-    pipelines_.bind_scene(cmd, RetroPipelineKind::Sprite4D);
-    pipelines_.push_scene_state(cmd, RetroPipelineKind::Sprite4D, pc);
+    // Stars + exhaust (white + 4D radial flare/glow from particle shader; post-bloom will further enhance trail)
+    pipelines_.bind_scene(cmd, RetroPipelineKind::ParticleAdditive);
+    pipelines_.push_scene_state(cmd, RetroPipelineKind::ParticleAdditive, pc);
+
+    // Bind bindless texture set if available (for future textured sprites/atlases)
+    auto& retroScene = pipelines_.scene();
+    if (auto* ds = retroScene.bindlessSet()) {
+        cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics,
+                               retroScene.layout(RetroPipelineKind::ParticleAdditive),
+                               0, {**ds}, {});
+    }
+
     vk::DeviceSize off = 0;
     cmd.bindVertexBuffers(0, *sprite_vertex_buffer_, off);
     cmd.draw(sprite_vertex_count_, 1, 0, 0);

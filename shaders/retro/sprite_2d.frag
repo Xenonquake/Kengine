@@ -1,8 +1,13 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(location = 0) in vec2 vUV;
 layout(location = 1) in vec4 vColor;
 layout(location = 2) in float vPaletteIdx;
+layout(location = 3) in flat uint vTexIndex;
+
+// Bindless texture array (set 0 binding 0 for retro sprites)
+layout(set = 0, binding = 0) uniform sampler2D textures[];
 
 layout(location = 0) out vec4 outColor;
 
@@ -30,8 +35,11 @@ vec3 retro_palette(float idx, float palette_index) {
 void main() {
     vec2 uv = vUV;
     float edge = smoothstep(0.0, 0.08, min(min(uv.x, 1.0-uv.x), min(uv.y, 1.0-uv.y)));
-    vec3 base = vColor.rgb * retro_palette(vPaletteIdx, pc.palette_index);
+
+    vec4 texSample = (vTexIndex != 0) ? texture(textures[nonuniformEXT(vTexIndex)], uv) : vec4(1.0);
+    vec3 base = texSample.rgb * vColor.rgb * retro_palette(vPaletteIdx, pc.palette_index);
     float scan = 1.0 - pc.scanline_strength * abs(sin(gl_FragCoord.y * 3.14159));
     vec3 col = base * edge * scan;
-    outColor = vec4(col, vColor.a * edge);
+    float alpha = texSample.a * vColor.a * edge;
+    outColor = vec4(col, alpha);
 }
