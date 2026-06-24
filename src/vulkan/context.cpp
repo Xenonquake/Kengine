@@ -54,7 +54,15 @@ void VulkanContext::init_vulkan() {
 }
 
 void VulkanContext::shutdown() {
+    // Ensure idle before tearing down
+    if (device_) {
+        device_->waitIdle();
+    }
+
+    // Reset things that depend on device first
     command_pool_.reset();
+    // allocator will be destroyed in its dtor (after this, before device in full context dtor)
+
     device_.reset();
     debug_messenger_.reset();
     physical_device_.reset();

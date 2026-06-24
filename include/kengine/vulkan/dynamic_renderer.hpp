@@ -24,7 +24,8 @@ public:
     static void begin(
         const vk::raii::CommandBuffer& cmd,
         const DynamicRenderTarget& target,
-        const ClearValues& clear = {});
+        const ClearValues& clear = {},
+        vk::RenderingFlags flags = {});
 
     static void end(const vk::raii::CommandBuffer& cmd);
 

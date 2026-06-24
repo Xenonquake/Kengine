@@ -38,7 +38,8 @@ void image_barrier(
 void DynamicRenderer::begin(
     const vk::raii::CommandBuffer& cmd,
     const DynamicRenderTarget& target,
-    const ClearValues& clear) {
+    const ClearValues& clear,
+    vk::RenderingFlags flags) {
 
     vk::RenderingAttachmentInfo color_att;
     color_att.imageView   = target.color_view;
@@ -48,6 +49,7 @@ void DynamicRenderer::begin(
     color_att.clearValue  = vk::ClearColorValue(clear.color);
 
     vk::RenderingInfo rendering;
+    rendering.flags        = flags;
     rendering.renderArea   = vk::Rect2D{{0, 0}, target.extent};
     rendering.layerCount   = 1;
     rendering.colorAttachmentCount = 1;

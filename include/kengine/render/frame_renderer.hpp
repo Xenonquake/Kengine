@@ -142,14 +142,27 @@ private:
     float background_flow_y_ = 0.0f;
     float background_flow_z_ = 1.0f;
 
-    struct MovingStar {
-        float base_x, base_y;
-        float depth; // negative = far, increases towards camera
+    // Dedicated high-density starfield (separate from gameplay entities)
+    struct Star {
+        float x, y, z;      // z is depth (negative = far ahead, increases toward camera)
+        float w;            // light 4D layer variation
         float speed;
         float size;
         std::uint32_t color;
+        float vx, vy, vz;   // for shader trails / motion glow
     };
-    std::vector<MovingStar> moving_stars_;
+
+    struct Starfield {
+        std::vector<Star> stars;
+        int max_stars = 900; // target 500-1250 for good density on black background
+
+        void init(float space_width = 9.0f, float space_height = 6.5f);
+        void update(float dt, float player_x, float player_y, float player_z,
+                    float flow_x, float flow_y, float flow_z);
+        void append_vertices(std::vector<RetroVertex4D>& out_verts, float reference_z);
+    };
+
+    Starfield starfield_;
 
     std::optional<Texture> demoTexture_;  // for bindless demo on stars
 
@@ -172,6 +185,8 @@ private:
     std::optional<ShaderModule> shader_sh_bake_;
 
     std::optional<vk::raii::DescriptorSetLayout> sh_bake_desc_layout_;
+    std::optional<vk::raii::DescriptorPool> sh_bake_desc_pool_;
+    std::optional<vk::raii::DescriptorSet> sh_bake_desc_set_;
     std::optional<vk::raii::PipelineLayout> sh_bake_pipeline_layout_;
     std::optional<vk::raii::Pipeline> sh_bake_pipeline_;
 
@@ -210,6 +225,8 @@ private:
     // Cull compute
     std::optional<ShaderModule> shader_cull_;
     std::optional<vk::raii::DescriptorSetLayout> cull_desc_layout_;
+    std::optional<vk::raii::DescriptorPool> cull_desc_pool_;
+    std::optional<vk::raii::DescriptorSet> cull_desc_set_;
     std::optional<vk::raii::PipelineLayout> cull_pipeline_layout_;
     std::optional<vk::raii::Pipeline> cull_pipeline_;
 

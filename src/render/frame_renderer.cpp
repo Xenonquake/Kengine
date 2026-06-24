@@ -28,6 +28,17 @@ FrameRenderer::FrameRenderer(VulkanContext& ctx, Swapchain& swapchain,
 
 FrameRenderer::~FrameRenderer() {
     ctx_.device().waitIdle();
+
+    // Explicit cleanup of compute-related resources (SH bake + culling) to prevent leaks reported at vkDestroyDevice.
+    // Optionals support reset(); plain raii members will have their destructors run automatically
+    // at the end of this function (before the class is fully destroyed), while the device is still valid.
+    cull_desc_set_.reset();
+    cull_desc_pool_.reset();
+    sh_bake_desc_set_.reset();
+    sh_bake_desc_pool_.reset();
+
+    // The various *_buf_ / *_mem_ raii objects declared as members will be destroyed here too.
+    // No manual ={} needed because their default ctors are deleted; dtor will handle.
 }
 
 void FrameRenderer::bind_frame_graph_passes() {
@@ -125,7 +136,16 @@ static std::uint32_t pick_host_visible_mem_type(const vk::raii::PhysicalDevice& 
 
 static void upload_host_buffer(vk::raii::DeviceMemory& mem,
                                const void* data,
-                               vk::DeviceSize size) {
+                               vk::DeviceSize size,
+                               const char* debug_name = nullptr) {
+    if (debug_name) {
+        std::cerr << "[DEBUG] Uploading " << size << " bytes to " << debug_name << "\n";
+    }
+    // Basic guard against obvious over-maps (real size is in the VkDeviceMemory allocation)
+    if (size > (32ULL * 1024 * 1024)) {  // 32 MiB sanity cap
+        std::cerr << "[ASSERT] Suspiciously large upload of " << size << " bytes for "
+                  << (debug_name ? debug_name : "unknown buffer") << "\n";
+    }
     void* mapped = mem.mapMemory(0, size);
     std::memcpy(mapped, data, static_cast<std::size_t>(size));
     mem.unmapMemory();
@@ -166,39 +186,106 @@ static std::vector<RetroVertex4D> make_sprite_quad(float x, float y, float z, fl
     return q;
 }
 
+// ===================================================================
+// Starfield implementation - high density rushing stars
+// ===================================================================
+
+void FrameRenderer::Starfield::init(float space_width, float space_height) {
+    stars.resize(max_stars);
+    for (int i = 0; i < max_stars; ++i) {
+        float r = (float)i / max_stars * 6.28f * 3.0f;
+        stars[i].x = sinf(r) * (space_width * (0.35f + (i % 9) * 0.09f));
+        stars[i].y = cosf(r * 0.65f) * (space_height * (0.45f + (i % 7) * 0.07f));
+        stars[i].z = -14.0f - (i % 17) * 0.55f;   // Spawn much farther back for strong rush
+        stars[i].w = (i % 6) * 0.13f;
+        stars[i].speed = 5.2f + (i % 9) * 0.65f;   // Fast forward rush
+        stars[i].size = 0.0019f + (i % 5) * 0.00028f; // Small base size
+        stars[i].color = 0xFFFFFFFFu;
+        stars[i].vx = 0.0f;
+        stars[i].vy = 0.0f;
+        stars[i].vz = stars[i].speed;
+    }
+}
+
+void FrameRenderer::Starfield::update(float dt, float player_x, float player_y, float player_z,
+                                     float flow_x, float flow_y, float flow_z) {
+    for (auto& s : stars) {
+        // Strong forward rush toward player
+        float effective_speed = s.speed * flow_z;
+        s.z += effective_speed * dt;
+
+        // Parallax lateral flow (much stronger when closer)
+        float parallax = 2.1f + (s.z * 0.28f);
+        s.x += flow_x * dt * parallax;
+        s.y += flow_y * dt * (parallax * 0.72f);
+
+        // Respawn far ahead when passed the player/camera
+        if (s.z > player_z + 1.8f) {
+            s.z = -15.5f - (rand() % 11) * 0.7f;
+            s.x = player_x + ((rand() % 2000) / 1000.0f - 1.0f) * 10.5f;
+            s.y = player_y + ((rand() % 2000) / 1000.0f - 1.0f) * 7.5f;
+            s.w = (rand() % 8) * 0.11f;
+
+            // Carry a bit of flow for continuity
+            s.x += flow_x * 0.35f;
+            s.y += flow_y * 0.35f;
+        }
+
+        // Velocity for shader (trails + glow)
+        s.vx = flow_x * 0.65f;
+        s.vy = flow_y * 0.55f;
+        s.vz = effective_speed * 1.35f;
+    }
+}
+
+void FrameRenderer::Starfield::append_vertices(std::vector<RetroVertex4D>& out_verts, float reference_z) {
+    for (const auto& s : stars) {
+        float dist = (s.z - reference_z);
+        float sz = s.size * (0.55f + dist * 0.24f);
+        if (sz < 0.0007f) sz = 0.0007f;
+
+        uint32_t bright = s.color; // pure white for max additive glow
+
+        // Main bright star
+        auto q = make_sprite_quad(s.x, s.y, s.z, s.w, sz, sz * 0.88f,
+                                  bright, 1, s.vx, s.vy, s.vz);
+        out_verts.insert(out_verts.end(), q.begin(), q.end());
+
+        // Cheap trails (1-2 faded copies)
+        for (int t = 1; t <= 2; ++t) {
+            float trail_z = s.z - s.vz * 0.032f * t;
+            float ta = 0.52f - t * 0.21f;
+            if (ta < 0.12f) break;
+
+            uint32_t tcol = (bright & 0x00FFFFFFu) | (static_cast<uint32_t>(ta * 255.0f) << 24);
+            float tsz = sz * (0.82f - t * 0.11f);
+
+            auto tq = make_sprite_quad(s.x - s.vx * 0.038f * t,
+                                       s.y - s.vy * 0.038f * t,
+                                       trail_z, s.w,
+                                       tsz, tsz * 0.82f,
+                                       tcol, 1, s.vx * 0.8f, s.vy * 0.8f, s.vz * 0.65f);
+            out_verts.insert(out_verts.end(), tq.begin(), tq.end());
+        }
+    }
+}
+
 void FrameRenderer::create_geometry_buffers() {
-    // --- Moving 2D stars for flying-through-space effect (small sprites coming towards viewer, using 4D flare via ParticleAdditive) ---
-    moving_stars_.clear();
-    for (int i = 0; i < 60; ++i) {
-        float r1 = (i * 0.37f);
-        float r2 = (i * 0.73f);
-        MovingStar s;
-        s.base_x = sinf(r1) * (3.0f + (i % 5) * 0.5f);  // wider for scaled out space
-        s.base_y = cosf(r2) * 2.5f;
-        s.depth = -2.5f - (i % 7) * 0.3f; // far negative
-        s.speed = 1.8f + (i % 4) * 0.3f;
-        s.size = 0.003f + (i % 3) * 0.0005f; // even smaller for 2D circle glow stars
-        s.color = 0xFFFFFFFFu;  // pure white (no neon/purple tint from palette)
-        moving_stars_.push_back(s);
-    }
+    // Starfield is now initialized in the ctor after demoTexture (see above)
 
-    // initial build of sprite buffer (will be updated every frame)
-    std::vector<RetroVertex4D> initial_sprites;
-    for (auto& s : moving_stars_) {
-        float z = s.depth;
-        // forward vel for motion effects
-        auto q = make_sprite_quad(s.base_x, s.base_y, z, 0.0f, s.size, s.size, s.color, 1, 0.f, 0.f, s.speed);
-        initial_sprites.insert(initial_sprites.end(), q.begin(), q.end());
-    }
-    // room for exhaust + bullets (generous for Phase 1)
-    initial_sprites.resize(initial_sprites.size() + 120);
+    // Pre-allocate a large enough sprite buffer for high-density starfield + particles.
+    // 900 stars * 3 quads (main + 2 trails) * 6 verts = ~16k + overhead for exhaust/bullets/enemies
+    constexpr std::uint32_t MAX_SPRITE_VERTS = 24000;
+    sprite_vertex_count_ = MAX_SPRITE_VERTS;
 
-    sprite_vertex_count_ = static_cast<std::uint32_t>(initial_sprites.size());
-    vk::DeviceSize sprite_size = sizeof(RetroVertex4D) * initial_sprites.size();
+    vk::DeviceSize sprite_size = sizeof(RetroVertex4D) * sprite_vertex_count_;
 
     sprite_vertex_buffer_ = create_vb(ctx_.device(), sprite_size);
     sprite_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), sprite_vertex_buffer_);
-    upload_host_buffer(sprite_vertex_memory_, initial_sprites.data(), sprite_size);
+
+    // Initialize with zeros (will be overwritten each frame)
+    std::vector<RetroVertex4D> initial_sprites(sprite_vertex_count_);
+    upload_host_buffer(sprite_vertex_memory_, initial_sprites.data(), sprite_size, "sprite_vertex (initial)");
 
     // 3D edgy green neon angular retro spaceship is built procedurally in update_ship_geometry
     // (wireframe lines using eLineList topology for angular look)
@@ -217,6 +304,10 @@ void FrameRenderer::create_geometry_buffers() {
                              ctx_.graphics_queue(), ctx_.command_pool(),
                              whiteData, 2, 2);
     }
+
+    // Initialize high-density rushing starfield
+    starfield_.init();
+
     // Register demo texture at bindless index 1
     if (demoTexture_) {
         auto& rs = pipelines_.scene();
@@ -333,54 +424,18 @@ void FrameRenderer::update_ship_geometry(float time) {
 
     ship_vertex_count_ = static_cast<std::uint32_t>(live.size());
     vk::DeviceSize sz = sizeof(RetroVertex4D) * live.size();
-    upload_host_buffer(ship_vertex_memory_, live.data(), sz);
+    upload_host_buffer(ship_vertex_memory_, live.data(), sz, "ship_vertex");
 }
 
 void FrameRenderer::update_moving_stars(float dt) {
-    if (moving_stars_.empty()) return;
-
-    // Flow members are updated from engine via update_background_flow (ship-relative)
+    // Update dedicated high-density starfield
+    starfield_.update(dt, ship_x_, ship_y_, ship_z_,
+                      background_flow_x_, background_flow_y_, background_flow_z_);
 
     std::vector<RetroVertex4D> sprite_verts;
 
-    for (auto& s : moving_stars_) {
-        // Apply ship-relative flow + depth (parallax)
-        float effective_speed = s.speed * background_flow_z_;
-        s.depth += effective_speed * dt;
-
-        // Lateral streaming (stronger parallax on closer stars)
-        s.base_x += background_flow_x_ * dt * (1.6f + (s.depth * 0.35f));
-        s.base_y += background_flow_y_ * dt * (1.3f + (s.depth * 0.25f));
-
-        if (s.depth > ship_z_ + 0.8f) {
-            // Recycle stars far ahead of the ship for procedural infinite running track / depth.
-            // Stars "drop behind the FOV" when passed, respawn far in front relative to current ship position.
-            // This gives perception of infinite space as ship flies through cycled environment.
-            float far_ahead = 8.0f;  // more depth for infinite scale out perception
-            s.depth = ship_z_ - far_ahead;
-
-            // Spawn wider for scaled-out space experience (not tight)
-            float space_width = 7.0f;  // wide for not tight, scale out into space
-            float space_height = 5.0f;
-            s.base_x = ship_x_ + ((rand() % 2000) / 1000.0f - 1.0f) * space_width;
-            s.base_y = ship_y_ + ((rand() % 2000) / 1000.0f - 1.0f) * space_height;
-
-            // No big random reset; position follows the "track" the ship is on.
-            // Small noise for variety
-            s.base_x += (rand() % 100 - 50) * 0.01f;
-            s.base_y += (rand() % 100 - 50) * 0.01f;
-        }
-
-        float sz = s.size * (0.5f + (s.depth + 3.0f) * 0.15f); // perspective scaling, smaller overall for distant feel
-
-        // Pass full velocity (for shader glow trails / motion blur)
-        float vx = background_flow_x_ * 0.75f;
-        float vy = background_flow_y_ * 0.75f;
-        float vz = effective_speed;
-
-        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color, 1, vx, vy, vz);
-        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
-    }
+    // Stars (rushing perspective + trails)
+    starfield_.append_vertices(sprite_verts, ship_z_);
 
     // === IMPROVED EXHAUST — tied to actual ship thrust + lateral velocity ===
     float thrust = std::max(0.0f, ship_vel_z_ * 0.9f + 0.35f);
@@ -449,16 +504,23 @@ void FrameRenderer::update_moving_stars(float dt) {
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
-    // pad if needed
-    while (sprite_verts.size() < sprite_vertex_count_) {
-        sprite_verts.push_back({{0,0,0,0}, {0,0,0}, {0,0}, 0, 0});
+    // Ensure we don't exceed the preallocated buffer (this was a source of vkMapMemory oversteps)
+    if (sprite_verts.size() > sprite_vertex_count_) {
+        std::cerr << "[ERROR] Sprite vertex overflow: generated " << sprite_verts.size()
+                  << " verts but buffer holds only " << sprite_vertex_count_
+                  << ". Some particles will be dropped. Increase MAX_SPRITE_VERTS.\n";
+        sprite_verts.resize(sprite_vertex_count_);
     }
-    if (sprite_verts.size() > sprite_vertex_count_) sprite_verts.resize(sprite_vertex_count_);
 
     current_sprite_draw_count_ = static_cast<std::uint32_t>(sprite_verts.size());
 
+    if (current_sprite_draw_count_ > 1000) {
+        std::cerr << "[DEBUG] Uploading " << current_sprite_draw_count_
+                  << " sprite verts this frame (stars+exhaust+entities)\n";
+    }
+
     vk::DeviceSize sz = sizeof(RetroVertex4D) * sprite_verts.size();
-    upload_host_buffer(sprite_vertex_memory_, sprite_verts.data(), sz);
+    upload_host_buffer(sprite_vertex_memory_, sprite_verts.data(), sz, "sprite_vertex (frame)");
 }
 
 void FrameRenderer::init_game_entities() {
@@ -544,7 +606,10 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
 
     ClearValues clear;
     clear.color = {0.0f, 0.0f, 0.0f, 1.0f};  // solid black for Space Arcade background
-    DynamicRenderer::begin(cmd, target, clear);
+
+    // Entire scene content (composite + particles + ship) will come from secondary command buffer(s)
+    DynamicRenderer::begin(cmd, target, clear,
+        vk::RenderingFlagBits::eContentsSecondaryCommandBuffers);
 
     vk::Viewport viewport{0, 0, static_cast<float>(extent.width),
                           static_cast<float>(extent.height), 0, 1};
@@ -553,10 +618,6 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     cmd.setScissor(0, scissor);
 
     auto pc = pipelines_.make_push_constants(state, cam, time, extent);
-
-    pipelines_.bind_scene(cmd, RetroPipelineKind::RetroComposite);
-    pipelines_.push_scene_state(cmd, RetroPipelineKind::RetroComposite, pc);
-    cmd.draw(3, 1, 0, 0);
 
     // Update moving stars (coming towards perspective) and ship trail
     static float last_t = time;
@@ -610,6 +671,15 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     sbi.pInheritanceInfo = &inh;
     secSprites.begin(sbi);
 
+    // Dynamic states must be set before any draw commands (even inside secondary)
+    secSprites.setViewport(0, viewport);
+    secSprites.setScissor(0, scissor);
+
+    // Composite background (inline in secondary)
+    pipelines_.bind_scene(secSprites, RetroPipelineKind::RetroComposite);
+    pipelines_.push_scene_state(secSprites, RetroPipelineKind::RetroComposite, pc);
+    secSprites.draw(3, 1, 0, 0);
+
     pipelines_.bind_scene(secSprites, RetroPipelineKind::ParticleAdditive);
     pipelines_.push_scene_state(secSprites, RetroPipelineKind::ParticleAdditive, pc);
     if (auto* ds = pipelines_.scene().bindlessSet()) {
@@ -618,6 +688,13 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     }
     secSprites.bindVertexBuffers(0, *sprite_vertex_buffer_, off);
     secSprites.drawIndirect(*indirect_cmd_buf_, 0, 1, 16);
+
+    // Vector line ship (also in secondary)
+    pipelines_.bind_scene(secSprites, RetroPipelineKind::VectorGlow);
+    pipelines_.push_scene_state(secSprites, RetroPipelineKind::VectorGlow, pc);
+    secSprites.bindVertexBuffers(0, *ship_vertex_buffer_, off);
+    secSprites.draw(ship_vertex_count_, 1, 0, 0);
+
     secSprites.end();
 
     if (auto jobs = ServiceLocator::get<JobSystem>()) {
@@ -628,12 +705,6 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
 
     std::array<vk::CommandBuffer, 1> secs{ *secSprites };
     cmd.executeCommands(secs);
-
-    // Vector line ship on primary (small)
-    pipelines_.bind_scene(cmd, RetroPipelineKind::VectorGlow);
-    pipelines_.push_scene_state(cmd, RetroPipelineKind::VectorGlow, pc);
-    cmd.bindVertexBuffers(0, *ship_vertex_buffer_, off);
-    cmd.draw(ship_vertex_count_, 1, 0, 0);
 
     // Render game entities (enemies, bullets) as additional sprites for prototype
     render_game_entities();
@@ -982,27 +1053,24 @@ void FrameRenderer::dispatch_sh_bake_once(const vk::raii::CommandBuffer& cmd) {
     if (sh_bake_done_ || !sh_bake_pipeline_ || !sh_lighting_ || sh_num_probes_ == 0) return;
 
     // Bind storage buffers (need a descriptor set)
-    // Lazily create a pool + set for bake (single use)
-    static std::optional<vk::raii::DescriptorPool> bake_pool;
-    static std::optional<vk::raii::DescriptorSet> bake_set;
-    if (!bake_set) {
+    if (!sh_bake_desc_set_ && sh_bake_desc_layout_) {
         vk::DescriptorPoolSize ps{}; ps.type = vk::DescriptorType::eStorageBuffer; ps.descriptorCount = 3;
         vk::DescriptorPoolCreateInfo pci{};
         pci.maxSets = 1;
         pci.poolSizeCount = 1;
         pci.pPoolSizes = &ps;
         pci.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
-        bake_pool = ctx_.device().createDescriptorPool(pci);
+        sh_bake_desc_pool_ = ctx_.device().createDescriptorPool(pci);
 
         vk::DescriptorSetAllocateInfo ai{};
-        ai.descriptorPool = *bake_pool;
+        ai.descriptorPool = *sh_bake_desc_pool_;
         ai.descriptorSetCount = 1;
         vk::DescriptorSetLayout lay = *sh_bake_desc_layout_;
         ai.pSetLayouts = &lay;
         auto sets = ctx_.device().allocateDescriptorSets(ai);
-        if (!sets.empty()) bake_set = std::move(sets[0]);
+        if (!sets.empty()) sh_bake_desc_set_ = std::move(sets[0]);
     }
-    if (!bake_set) return;
+    if (!sh_bake_desc_set_) return;
 
     // Write descriptors
     std::array<vk::DescriptorBufferInfo, 3> bufInfos{};
@@ -1012,7 +1080,7 @@ void FrameRenderer::dispatch_sh_bake_once(const vk::raii::CommandBuffer& cmd) {
 
     std::array<vk::WriteDescriptorSet, 3> writes{};
     for (int i=0; i<3; ++i) {
-        writes[i].dstSet = *bake_set;
+        writes[i].dstSet = *sh_bake_desc_set_;
         writes[i].dstBinding = i;
         writes[i].descriptorType = vk::DescriptorType::eStorageBuffer;
         writes[i].descriptorCount = 1;
@@ -1023,7 +1091,7 @@ void FrameRenderer::dispatch_sh_bake_once(const vk::raii::CommandBuffer& cmd) {
     // Barrier if previous use (noop first time)
     // Dispatch
     cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *sh_bake_pipeline_);
-    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *sh_bake_pipeline_layout_, 0, {*bake_set}, {});
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *sh_bake_pipeline_layout_, 0, {*sh_bake_desc_set_}, {});
 
     struct SHBakePush { uint32_t num_probes, num_samples, p0, p1; } push{ sh_num_probes_, sh_num_samples_, 0, 0 };
     cmd.pushConstants<SHBakePush>(*sh_bake_pipeline_layout_, vk::ShaderStageFlagBits::eCompute, 0, push);
@@ -1248,23 +1316,21 @@ void FrameRenderer::dispatch_cull(const vk::raii::CommandBuffer& cmd, const Came
     Camera4D::FrustumPlanes fr;
     cam.extract_frustum_planes(aspect, fr);
 
-    static std::optional<vk::raii::DescriptorPool> cull_pool;
-    static std::optional<vk::raii::DescriptorSet> cull_set;
-    if (!cull_set && cull_desc_layout_) {
+    if (!cull_desc_set_ && cull_desc_layout_) {
         vk::DescriptorPoolSize ps{vk::DescriptorType::eStorageBuffer, 8};
         vk::DescriptorPoolCreateInfo pci{};
         pci.maxSets = 2; pci.poolSizeCount=1; pci.pPoolSizes=&ps;
         pci.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
-        cull_pool = ctx_.device().createDescriptorPool(pci);
+        cull_desc_pool_ = ctx_.device().createDescriptorPool(pci);
 
         vk::DescriptorSetAllocateInfo ai{};
-        ai.descriptorPool = *cull_pool; ai.descriptorSetCount=1;
+        ai.descriptorPool = *cull_desc_pool_; ai.descriptorSetCount=1;
         vk::DescriptorSetLayout lay = *cull_desc_layout_;
         ai.pSetLayouts = &lay;
         auto sets = ctx_.device().allocateDescriptorSets(ai);
-        if (!sets.empty()) cull_set = std::move(sets[0]);
+        if (!sets.empty()) cull_desc_set_ = std::move(sets[0]);
     }
-    if (!cull_set) return;
+    if (!cull_desc_set_) return;
 
     std::array<vk::DescriptorBufferInfo, 4> binfos{};
     binfos[0] = vk::DescriptorBufferInfo{*instance_buf_, 0, VK_WHOLE_SIZE};
@@ -1274,14 +1340,14 @@ void FrameRenderer::dispatch_cull(const vk::raii::CommandBuffer& cmd, const Came
 
     std::array<vk::WriteDescriptorSet, 4> ws{};
     for (int i=0;i<4;i++) {
-        ws[i].dstSet = *cull_set; ws[i].dstBinding = i;
+        ws[i].dstSet = *cull_desc_set_; ws[i].dstBinding = i;
         ws[i].descriptorType = vk::DescriptorType::eStorageBuffer;
         ws[i].descriptorCount=1; ws[i].pBufferInfo = &binfos[i];
     }
     ctx_.device().updateDescriptorSets(ws, {});
 
     cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *cull_pipeline_);
-    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *cull_pipeline_layout_, 0, {*cull_set}, {});
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *cull_pipeline_layout_, 0, {*cull_desc_set_}, {});
 
     struct CullPush {
         uint32_t num;

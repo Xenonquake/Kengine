@@ -5,20 +5,32 @@
 set -euo pipefail
 
 # Configuration
-DEMO_PATH="${1:-./build/kengine_demo}"  # Default to build/ ; pass path as argument if needed
 LOG_DIR="debug_logs"
 VALGRIND_LOG="${LOG_DIR}/valgrind_$(date +%Y%m%d_%H%M%S).log"
 SUPPRESSIONS="valgrind_suppressions.supp"
 
 mkdir -p "$LOG_DIR"
 
-echo "=== Kengine Debug Test Script ==="
-echo "Demo path: $DEMO_PATH"
-echo "Logs will be saved to $LOG_DIR/"
-echo ""
+# Create a minimal suppressions file if it doesn't exist (avoids "can't open suppressions" error)
+if [[ ! -f "$SUPPRESSIONS" ]]; then
+    cat > "$SUPPRESSIONS" << 'EOT'
+{
+   X11_client
+   Memcheck:Leak
+   ...
+   fun:X*
+}
+{
+   Vulkan_driver
+   Memcheck:Leak
+   ...
+   fun:vk*
+}
+EOT
+fi
 
 usage() {
-    echo "Usage: $0 [command]"
+    echo "Usage: $0 <command> [demo_path]"
     echo "Commands:"
     echo "  run          - Normal run"
     echo "  valgrind     - Run with Valgrind (Memcheck)"
@@ -26,6 +38,8 @@ usage() {
     echo "  vg-gdb       - Valgrind + GDB (for advanced debugging)"
     echo "  all          - Run all tests sequentially"
     echo "  help         - Show this help"
+    echo ""
+    echo "demo_path defaults to ./build/kengine_demo"
     exit 1
 }
 
@@ -33,7 +47,16 @@ if [[ $# -eq 0 || "$1" == "help" ]]; then
     usage
 fi
 
-case "$1" in
+COMMAND="$1"
+DEMO_PATH="${2:-./build/kengine_demo}"
+
+echo "=== Kengine Debug Test Script ==="
+echo "Command: $COMMAND"
+echo "Demo path: $DEMO_PATH"
+echo "Logs will be saved to $LOG_DIR/"
+echo ""
+
+case "$COMMAND" in
     run)
         echo "Running normal execution..."
         "$DEMO_PATH"
@@ -61,14 +84,14 @@ case "$1" in
     
     vg-gdb)
         echo "Running Valgrind with GDB support..."
-        echo "In another terminal run: gdb ./build-debug/kengine_demo then 'target remote | vgdb'"
+        echo "In another terminal run: gdb $DEMO_PATH then 'target remote | vgdb'"
         valgrind --vgdb-error=0 --log-file="${LOG_DIR}/vgdb.log" "$DEMO_PATH"
         ;;
     
     all)
         echo "Running all tests..."
-        "$0" run
-        "$0" valgrind
+        "$0" run "$DEMO_PATH"
+        "$0" valgrind "$DEMO_PATH"
         echo "GDB test skipped in 'all' mode (interactive). Run manually if needed."
         ;;
     

@@ -1,0 +1,18 @@
+{
+   X11_client
+   Memcheck:Leak
+   ...
+   fun:X*
+}
+{
+   Vulkan_driver_still_reachable
+   Memcheck:Leak
+   ...
+   fun:vk*
+}
+{
+   glibc_conditional_jump
+   Memcheck:Cond
+   ...
+   fun:*
+}
