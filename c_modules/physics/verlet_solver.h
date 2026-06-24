@@ -17,7 +17,8 @@ typedef struct ke_phys_body {
     uint32_t flags;
 } ke_phys_body;
 
-#define KE_PHYS_STATIC  (1u << 0)
+#define KE_PHYS_STATIC    (1u << 0)
+#define KE_PHYS_KINEMATIC (1u << 1)
 
 typedef struct ke_phys_world {
     ke_phys_body* bodies;

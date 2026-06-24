@@ -44,6 +44,15 @@ void ke_phys_world_step(ke_phys_world* world, float dt) {
         ke_phys_body* b = &world->bodies[i];
         if (b->flags & KE_PHYS_STATIC) continue;
 
+        if (b->flags & KE_PHYS_KINEMATIC) {
+            /* Kinematic: velocity set by input/AI code each frame. Integrate position from velocity only. */
+            ke_vec4 new_pos = ke_vec4_add(b->position, ke_vec4_scale(b->velocity, dt));
+            b->position     = new_pos;
+            b->velocity     = ke_vec4_scale(b->velocity, world->damping);
+            b->acceleration = (ke_vec4){0, 0, 0, 0};
+            continue;
+        }
+
         ke_vec4 total_accel = ke_vec4_add(grav, b->acceleration);
 
         /* Velocity Verlet: low latency, good stability */

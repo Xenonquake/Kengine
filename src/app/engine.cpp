@@ -36,6 +36,27 @@ bool Engine::init() {
     physics_ = std::make_unique<PhysicsWorld>();
     lighting_ = std::make_unique<SHLightingSystem>(16);
 
+    // Demo physics entity to exercise bidirectional sync each frame (dynamic + gravity)
+    {
+        auto pe = registry_.create();
+        registry_.emplace<TransformComponent>(pe);
+        if (auto* tc = registry_.get<TransformComponent>(pe)) {
+            tc->position[0] = 0.0f;
+            tc->position[1] = 5.0f;
+            tc->position[2] = 0.0f;
+            tc->position[3] = 0.0f;
+        }
+        auto& pc = registry_.emplace<PhysicsComponent>(pe);
+        pc.mass = 1.0f;
+        pc.kinematic = false;
+        ke_phys_body b{};
+        if (auto* tc = registry_.get<TransformComponent>(pe)) {
+            b.position = ke_vec4_make(tc->position[0], tc->position[1], tc->position[2], tc->position[3]);
+        }
+        b.mass = pc.mass;
+        pc.body_index = physics_->create_body(b);
+    }
+
     ServiceLocator::register_instance<JobSystem>(jobs_);
 
     try {
@@ -69,11 +90,6 @@ bool Engine::init() {
         camera.primary = true;
         auto& retro = registry_.emplace<RetroVisualComponent>(entity);
         retro.visual = retro_state_;
-
-        ke_phys_body body{};
-        body.position = ke_vec4_make(0, 5, 0, 0);
-        body.mass     = 1.0f;
-        physics_->add_body(body);
 
         std::cout << "Kengine: basic Full HD offscreen + depth + pipeline cache ready\n";
         return true;
@@ -154,7 +170,38 @@ void Engine::update(float dt) {
     retro_state_.w_morph = 0.15f;  // mild perspective for depth feel, no heavy 4D
     retro_state_.w_slice = 0.0f;
 
+    // --- Bidirectional physics sync: ECS <-> ke_phys bodies ---
+    // Pre-step: Transform (and kinematic velocity) -> physics body
+    registry_.view<PhysicsComponent>([this](Entity e, PhysicsComponent& pc) {
+        if (pc.body_index < 0) return;
+        ke_phys_body* body = physics_->get_body(pc.body_index);
+        if (!body) return;
+        if (auto* tc = registry_.get<TransformComponent>(e)) {
+            body->position = ke_vec4_make(tc->position[0], tc->position[1], tc->position[2], tc->position[3]);
+            if (pc.kinematic) {
+                body->velocity = ke_vec4_make(pc.velocity[0], pc.velocity[1], pc.velocity[2], pc.velocity[3]);
+            }
+        }
+    });
+
     physics_->step(dt);
+
+    // Post-step: physics body -> TransformComponent (for rendering) + mirror velocity
+    registry_.view<PhysicsComponent>([this](Entity e, PhysicsComponent& pc) {
+        if (pc.body_index < 0) return;
+        ke_phys_body* body = physics_->get_body(pc.body_index);
+        if (!body) return;
+        if (auto* tc = registry_.get<TransformComponent>(e)) {
+            tc->position[0] = body->position.x;
+            tc->position[1] = body->position.y;
+            tc->position[2] = body->position.z;
+            tc->position[3] = body->position.w;
+        }
+        pc.velocity[0] = body->velocity.x;
+        pc.velocity[1] = body->velocity.y;
+        pc.velocity[2] = body->velocity.z;
+        pc.velocity[3] = body->velocity.w;
+    });
 
     registry_.view<RetroVisualComponent>([this](Entity /*e*/, RetroVisualComponent& r) {
         r.visual = retro_state_;

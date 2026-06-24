@@ -17,8 +17,51 @@ void PhysicsWorld::step(float dt) {
     ke_spatial_hash_rebuild(spatial_, world_);
 }
 
+int PhysicsWorld::create_body(const ke_phys_body& body) {
+    if (!world_) return -1;
+    size_t idx = world_->count;
+    if (ke_phys_world_add_body(world_, body) != 0) return -1;
+    return static_cast<int>(idx);
+}
+
+ke_phys_body* PhysicsWorld::get_body(int index) {
+    if (!world_ || index < 0 || static_cast<size_t>(index) >= world_->count) return nullptr;
+    return &world_->bodies[index];
+}
+
+const ke_phys_body* PhysicsWorld::get_body(int index) const {
+    if (!world_ || index < 0 || static_cast<size_t>(index) >= world_->count) return nullptr;
+    return &world_->bodies[index];
+}
+
+size_t PhysicsWorld::body_count() const {
+    return world_ ? world_->count : 0;
+}
+
+void PhysicsWorld::set_velocity(int index, float vx, float vy, float vz, float vw) {
+    if (auto* b = get_body(index)) {
+        b->velocity = ke_vec4_make(vx, vy, vz, vw);
+    }
+}
+
+void PhysicsWorld::add_acceleration(int index, float ax, float ay, float az, float aw) {
+    if (auto* b = get_body(index)) {
+        b->acceleration = ke_vec4_add(b->acceleration, ke_vec4_make(ax, ay, az, aw));
+    }
+}
+
+void PhysicsWorld::accumulate_force(int index, float fx, float fy, float fz, float fw) {
+    if (auto* b = get_body(index)) {
+        if (b->inverse_mass > 0.0f) {
+            b->acceleration = ke_vec4_add(b->acceleration, ke_vec4_make(
+                fx * b->inverse_mass, fy * b->inverse_mass,
+                fz * b->inverse_mass, fw * b->inverse_mass));
+        }
+    }
+}
+
 void PhysicsWorld::add_body(const ke_phys_body& body) {
-    ke_phys_world_add_body(world_, body);
+    create_body(body);
 }
 
 void PhysicsWorld::set_gravity(float x, float y, float z, float w) {

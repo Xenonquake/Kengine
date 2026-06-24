@@ -87,8 +87,11 @@ struct CameraComponent : IComponent {
 };
 
 struct PhysicsComponent : IComponent {
+    int   body_index = -1;
     float mass = 1.0f;
     bool  static_body = false;
+    bool  kinematic = false;   /* kinematic: velocity driven by input/AI (pre-step), physics integrates pos only */
+    float velocity[4] = {0, 0, 0, 0};
 };
 
 struct RetroVisualComponent : IComponent {

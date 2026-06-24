@@ -9,15 +9,19 @@ struct IComponent {
     virtual ~IComponent() = default;
 };
 
+namespace detail {
+inline ComponentTypeId& component_type_counter() {
+    static ComponentTypeId counter = 0;
+    return counter;
+}
+}
+
 template<typename T>
 struct ComponentType {
     static ComponentTypeId id() {
-        static ComponentTypeId type_id = next_id_++;
+        static const ComponentTypeId type_id = detail::component_type_counter()++;
         return type_id;
     }
-
-private:
-    static inline ComponentTypeId next_id_ = 0;
 };
 
 } // namespace kengine
