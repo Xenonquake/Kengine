@@ -179,6 +179,13 @@ void Engine::update(float dt) {
 
     GLFWwindow* win = vulkan_ ? vulkan_->window() : nullptr;
 
+    // Clean exit on ESC for graceful shutdown
+    if (win && glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+        running_ = false;
+        glfwSetWindowShouldClose(win, GLFW_TRUE);
+        return;  // skip remaining update logic
+    }
+
     // Defaults for 4D params (w_slice, hyper_rot). Eye/target now driven by chase_ship for 3D Star Fox feel.
     static bool camera_set = false;
     if (!camera_set) {
@@ -191,36 +198,67 @@ void Engine::update(float dt) {
     retro_state_.w_slice = 0.0f;
 
     // ------------------------------------------------------------------
-    // Player 3D movement: WASD (xy) + QE (z) + RF (w)  --> set kinematic vel
+    // Locked ship-relative controls (tied to ship forward, no free off-axis flip)
+    // WASD: strafe left/right + up/down in ship's local plane (using persistent forward)
+    // QE: forward/back thrust along ship's forward
+    // RF: minor w-layer (locked small for arcade feel)
+    // Camera is rigidly chased to ship (see chase_ship)
     // ------------------------------------------------------------------
     if (win && player_entity_.valid()) {
         if (auto* pc = world_->registry().get<PhysicsComponent>(player_entity_)) {
             if (pc->kinematic) {
                 const float ps = 3.8f;  // player speed (units/sec)
-                float vx = 0, vy = 0, vz = 0, vw = 0;
+                float wvx = 0, wvy = 0, wvz = 0, wvw = 0;
+
+                // Build local basis from ship's persistent forward (locked, no flip)
+                float fwd[3] = {ship_forward_[0], ship_forward_[1], ship_forward_[2]};
+                float up[3] = {0, 1, 0};
+                float rgt[3] = {
+                    fwd[1]*up[2] - fwd[2]*up[1],
+                    fwd[2]*up[0] - fwd[0]*up[2],
+                    fwd[0]*up[1] - fwd[1]*up[0]
+                };
+                float rlen = sqrtf(rgt[0]*rgt[0] + rgt[1]*rgt[1] + rgt[2]*rgt[2]);
+                if (rlen > 0.001f) {
+                    rgt[0] /= rlen; rgt[1] /= rlen; rgt[2] /= rlen;
+                } else {
+                    rgt[0] = 1; rgt[1] = 0; rgt[2] = 0;
+                }
+                float shp_up[3] = {
+                    rgt[1]*fwd[2] - rgt[2]*fwd[1],
+                    rgt[2]*fwd[0] - rgt[0]*fwd[2],
+                    rgt[0]*fwd[1] - rgt[1]*fwd[0]
+                };
 
                 bool left  = (glfwGetKey(win, GLFW_KEY_LEFT ) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS);
                 bool right = (glfwGetKey(win, GLFW_KEY_RIGHT) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS);
-                bool up    = (glfwGetKey(win, GLFW_KEY_UP   ) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS);
+                bool upk   = (glfwGetKey(win, GLFW_KEY_UP   ) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS);
                 bool down  = (glfwGetKey(win, GLFW_KEY_DOWN ) == GLFW_PRESS || glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS);
 
-                if (left)  vx -= ps;
-                if (right) vx += ps;
-                if (up)    vy += ps * 0.75f;
-                if (down)  vy -= ps * 0.75f;
+                // Horizontal strafe along local right (tied to ship)
+                if (left)  { wvx -= rgt[0] * ps; wvy -= rgt[1] * ps; wvz -= rgt[2] * ps; }
+                if (right) { wvx += rgt[0] * ps; wvy += rgt[1] * ps; wvz += rgt[2] * ps; }
 
-                // Z (depth/height) thrust
-                if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) vz -= ps * 0.7f;
-                if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) vz += ps * 0.7f;
+                // Vertical strafe along ship's local up (locked to ship, no world up flip)
+                if (upk)   { wvx += shp_up[0] * ps * 0.7f; wvy += shp_up[1] * ps * 0.7f; wvz += shp_up[2] * ps * 0.7f; }
+                if (down)  { wvx -= shp_up[0] * ps * 0.7f; wvy -= shp_up[1] * ps * 0.7f; wvz -= shp_up[2] * ps * 0.7f; }
 
-                // W-dimension (4th) thrust
-                if (glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS) vw -= ps * 0.5f;
-                if (glfwGetKey(win, GLFW_KEY_F) == GLFW_PRESS) vw += ps * 0.5f;
+                // Forward thrust along ship's forward (tied to ship)
+                bool fwd_thrust = (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS);
+                bool back_thrust = (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS);
+                if (fwd_thrust)  { wvx += fwd[0] * ps; wvy += fwd[1] * ps; wvz += fwd[2] * ps; }
+                if (back_thrust) { wvx -= fwd[0] * ps; wvy -= fwd[1] * ps; wvz -= fwd[2] * ps; }
 
-                pc->velocity[0] = vx;
-                pc->velocity[1] = vy;
-                pc->velocity[2] = vz;
-                pc->velocity[3] = vw;
+                // Minor w (4th dim) - locked small, not erratic
+                bool w_neg = (glfwGetKey(win, GLFW_KEY_R) == GLFW_PRESS);
+                bool w_pos = (glfwGetKey(win, GLFW_KEY_F) == GLFW_PRESS);
+                if (w_neg) wvw -= ps * 0.3f;
+                if (w_pos) wvw += ps * 0.3f;
+
+                pc->velocity[0] = wvx;
+                pc->velocity[1] = wvy;
+                pc->velocity[2] = wvz;
+                pc->velocity[3] = wvw;
             }
         }
     }
@@ -286,25 +324,11 @@ void Engine::update(float dt) {
         }
     }
 
-    // Camera free-flight controls (fly through the 3D/4D scene)
-    if (win) {
-        float cms = camera_.move_speed * dt;
-        if (glfwGetKey(win, GLFW_KEY_J) == GLFW_PRESS) camera_.move(-cms, 0, 0);
-        if (glfwGetKey(win, GLFW_KEY_L) == GLFW_PRESS) camera_.move( cms, 0, 0);
-        if (glfwGetKey(win, GLFW_KEY_I) == GLFW_PRESS) camera_.move(0, 0,  cms);
-        if (glfwGetKey(win, GLFW_KEY_K) == GLFW_PRESS) camera_.move(0, 0, -cms);
-        if (glfwGetKey(win, GLFW_KEY_U) == GLFW_PRESS) camera_.move(0,  cms, 0);
-        if (glfwGetKey(win, GLFW_KEY_O) == GLFW_PRESS) camera_.move(0, -cms, 0);
-
-        // Live 4D slice / rotation scrubbing (reveals structure while objects move in 3D)
-        float sms = camera_.slice_speed * dt;
-        if (glfwGetKey(win, GLFW_KEY_Z) == GLFW_PRESS) camera_.adjust_slice(-sms);
-        if (glfwGetKey(win, GLFW_KEY_X) == GLFW_PRESS) camera_.adjust_slice( sms);
-        if (glfwGetKey(win, GLFW_KEY_7) == GLFW_PRESS) camera_.adjust_hyper(0, -sms);
-        if (glfwGetKey(win, GLFW_KEY_8) == GLFW_PRESS) camera_.adjust_hyper(0,  sms);
-        if (glfwGetKey(win, GLFW_KEY_9) == GLFW_PRESS) camera_.adjust_hyper(2, -sms * 0.6f);
-        if (glfwGetKey(win, GLFW_KEY_0) == GLFW_PRESS) camera_.adjust_hyper(2,  sms * 0.6f);
-    }
+    // 4D visual field locked for strict arcade shooter (no erratic free manipulation)
+    // Subtle fixed 4D for retro feel; background stars still use flow for dynamism
+    camera_.w_slice = 0.0f;
+    std::fill(std::begin(camera_.hyper_rot), std::end(camera_.hyper_rot), 0.0f);
+    // (Previously free keys Z/X/7/0 etc. removed to lock to ship and prevent flipping/erratic 4D)
 
     // --- Playable loop core (input already handled above for player vel/forces) ---
     // 2. Physics step (C hotpath in World) + 3. sync back to ECS Transforms
@@ -362,19 +386,31 @@ void Engine::update(float dt) {
     // 4D effects (slice/hyper) are for visual flair on background/special elements.
     if (player_entity_.valid()) {
         if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
-            if (auto* ppc = world_->registry().get<PhysicsComponent>(player_entity_)) {
-                float ship_pos[3] = {tc->position[0], tc->position[1], tc->position[2]};
-                float vx = ppc->velocity[0];
-                float vy = ppc->velocity[1];
-                float vz = ppc->velocity[2];
-                float flen = sqrtf(vx*vx + vy*vy + vz*vz);
-                float ship_fwd[3] = {0, -1, 0};  // default
-                if (flen > 0.01f) {
-                    ship_fwd[0] = vx / flen;
-                    ship_fwd[1] = vy / flen;
-                    ship_fwd[2] = vz / flen;
+            float ship_pos[3] = {tc->position[0], tc->position[1], tc->position[2]};
+            // Use persistent forward for locked orientation (updated from previous vel)
+            camera_.chase_ship(ship_pos, ship_forward_, dt);
+        }
+    }
+
+    // Update persistent ship forward from current velocity for locked ship-tied controls next frame
+    // This prevents flipping off axis by smoothing and using consistent direction
+    if (player_entity_.valid()) {
+        if (auto* ppc = world_->registry().get<PhysicsComponent>(player_entity_)) {
+            float vx = ppc->velocity[0];
+            float vy = ppc->velocity[1];
+            float vz = ppc->velocity[2];
+            float len = sqrtf(vx*vx + vy*vy + vz*vz);
+            if (len > 0.1f) {
+                float nf[3] = {vx/len, vy/len, vz/len};
+                float t = 0.25f;  // smoothing factor
+                for(int i = 0; i < 3; i++) {
+                    ship_forward_[i] = ship_forward_[i] * (1.0f - t) + nf[i] * t;
                 }
-                camera_.chase_ship(ship_pos, ship_fwd, dt);
+            }
+            // normalize
+            float fl = sqrtf(ship_forward_[0]*ship_forward_[0] + ship_forward_[1]*ship_forward_[1] + ship_forward_[2]*ship_forward_[2]);
+            if (fl > 0.001f) {
+                for(int i = 0; i < 3; i++) ship_forward_[i] /= fl;
             }
         }
     }
@@ -445,7 +481,7 @@ void Engine::update(float dt) {
         if (pc.body_index < 0) return;
         auto* b = world_->physics().get_body(pc.body_index);
         if (!b) return;
-        const float limx = 2.6f, limy = 2.0f, limz = 1.4f;
+        const float limx = 8.0f, limy = 6.0f, limz = 5.0f;  // wider for scaled space / running track feel
         auto reflect = [](float& p, float& v, float lim, float damp = 0.65f) {
             if (p > lim) { p = lim; v = -fabs(v) * damp; }
             else if (p < -lim) { p = -lim; v = fabs(v) * damp; }

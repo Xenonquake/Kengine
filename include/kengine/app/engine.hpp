@@ -80,6 +80,9 @@ private:
     float ship_z_ = 1.6f;
     float ship_w_ = 0.05f;
 
+    // Persistent ship forward for locked ship-relative controls (prevents flipping off-axis)
+    float ship_forward_[3] = {0.0f, 0.0f, -1.0f};
+
     // Player entity driven by 3D input -> physics velocity
     Entity player_entity_;
     int    player_body_index_ = -1;

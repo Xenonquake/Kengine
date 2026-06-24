@@ -159,11 +159,11 @@ void FrameRenderer::create_geometry_buffers() {
         float r1 = (i * 0.37f);
         float r2 = (i * 0.73f);
         MovingStar s;
-        s.base_x = sinf(r1) * (0.9f + (i % 5) * 0.1f);
-        s.base_y = cosf(r2) * 0.9f;
+        s.base_x = sinf(r1) * (3.0f + (i % 5) * 0.5f);  // wider for scaled out space
+        s.base_y = cosf(r2) * 2.5f;
         s.depth = -2.5f - (i % 7) * 0.3f; // far negative
         s.speed = 1.8f + (i % 4) * 0.3f;
-        s.size = 0.012f + (i % 3) * 0.003f;
+        s.size = 0.003f + (i % 3) * 0.0005f; // even smaller for 2D circle glow stars
         s.color = 0xFFFFFFFFu;  // pure white (no neon/purple tint from palette)
         moving_stars_.push_back(s);
     }
@@ -314,18 +314,26 @@ void FrameRenderer::update_moving_stars(float dt) {
         s.base_x += background_flow_x_ * dt * (1.6f + (s.depth * 0.35f));
         s.base_y += background_flow_y_ * dt * (1.3f + (s.depth * 0.25f));
 
-        if (s.depth > 1.8f) {
-            // respawn far away, random lateral position
-            s.depth = -2.8f - (rand() % 5) * 0.15f;
-            s.base_x = ((rand() % 2000) / 1000.0f - 1.0f) * 0.95f;
-            s.base_y = ((rand() % 2000) / 1000.0f - 1.0f) * 0.7f;
+        if (s.depth > ship_z_ + 0.8f) {
+            // Recycle stars far ahead of the ship for procedural infinite running track / depth.
+            // Stars "drop behind the FOV" when passed, respawn far in front relative to current ship position.
+            // This gives perception of infinite space as ship flies through cycled environment.
+            float far_ahead = 8.0f;  // more depth for infinite scale out perception
+            s.depth = ship_z_ - far_ahead;
 
-            // Inherit a bit of current flow for continuity
-            s.base_x += background_flow_x_ * 0.35f;
-            s.base_y += background_flow_y_ * 0.35f;
+            // Spawn wider for scaled-out space experience (not tight)
+            float space_width = 7.0f;  // wide for not tight, scale out into space
+            float space_height = 5.0f;
+            s.base_x = ship_x_ + ((rand() % 2000) / 1000.0f - 1.0f) * space_width;
+            s.base_y = ship_y_ + ((rand() % 2000) / 1000.0f - 1.0f) * space_height;
+
+            // No big random reset; position follows the "track" the ship is on.
+            // Small noise for variety
+            s.base_x += (rand() % 100 - 50) * 0.01f;
+            s.base_y += (rand() % 100 - 50) * 0.01f;
         }
 
-        float sz = s.size * (1.0f + (s.depth + 2.8f) * 0.4f); // grow as it approaches
+        float sz = s.size * (0.5f + (s.depth + 3.0f) * 0.15f); // perspective scaling, smaller overall for distant feel
 
         // Pass full velocity (for shader glow trails / motion blur)
         float vx = background_flow_x_ * 0.75f;
