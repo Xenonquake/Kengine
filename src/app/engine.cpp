@@ -33,46 +33,46 @@ Engine::~Engine() {
 bool Engine::init() {
     jobs_    = std::make_shared<JobSystem>();
     vulkan_  = std::make_unique<VulkanContext>(VulkanConfig{.vsync = config_.vsync});
-    physics_ = std::make_unique<PhysicsWorld>();
+    world_   = std::make_shared<World>();
     lighting_ = std::make_unique<SHLightingSystem>(16);
 
     // Player entity (kinematic for responsive 3D arcade controls)
     {
-        player_entity_ = registry_.create();
-        registry_.emplace<TransformComponent>(player_entity_);
-        if (auto* tc = registry_.get<TransformComponent>(player_entity_)) {
+        player_entity_ = world_->registry().create();
+        world_->registry().emplace<TransformComponent>(player_entity_);
+        if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
             tc->position[0] = 0.0f;
             tc->position[1] = -0.55f;   // near classic ship start area
             tc->position[2] = 0.0f;
             tc->position[3] = 0.05f;
         }
-        auto& pc = registry_.emplace<PhysicsComponent>(player_entity_);
+        auto& pc = world_->registry().emplace<PhysicsComponent>(player_entity_);
         pc.mass = 1.0f;
         pc.kinematic = true;            // velocity directly driven by input
         ke_phys_body b{};
-        if (auto* tc = registry_.get<TransformComponent>(player_entity_)) {
+        if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
             b.position = ke_vec4_make(tc->position[0], tc->position[1], tc->position[2], tc->position[3]);
         }
         b.mass = pc.mass;
-        player_body_index_ = physics_->create_body(b);
+        player_body_index_ = world_->physics().create_body(b);
         pc.body_index = player_body_index_;
     }
 
     // Spawn 5-10 physics bodies for demo (player + enemies/pickups). They use Verlet + spatial hash queries for interactions.
     for (int i = 0; i < 7; ++i) {
-        auto de = registry_.create();
-        registry_.emplace<TransformComponent>(de);
-        if (auto* tc = registry_.get<TransformComponent>(de)) {
+        auto de = world_->registry().create();
+        world_->registry().emplace<TransformComponent>(de);
+        if (auto* tc = world_->registry().get<TransformComponent>(de)) {
             tc->position[0] = -2.0f + (i % 5) * 0.9f;
             tc->position[1] =  0.6f + (i / 3) * 0.8f - (i % 2) * 0.4f;
             tc->position[2] =  0.4f * ((i % 3) - 1);
             tc->position[3] =  0.05f * (i - 3);
         }
-        auto& pc = registry_.emplace<PhysicsComponent>(de);
+        auto& pc = world_->registry().emplace<PhysicsComponent>(de);
         pc.mass = 0.6f + 0.1f * (i % 3);
         pc.kinematic = false;
         ke_phys_body b{};
-        if (auto* tc = registry_.get<TransformComponent>(de)) {
+        if (auto* tc = world_->registry().get<TransformComponent>(de)) {
             b.position = ke_vec4_make(tc->position[0], tc->position[1], tc->position[2], tc->position[3]);
             float ivx = 1.2f * sinf(i * 1.3f);
             float ivy = -0.6f + (i % 3) * 0.3f;
@@ -80,11 +80,12 @@ bool Engine::init() {
             b.velocity = ke_vec4_make(ivx, ivy, ivz, 0.1f * (i-3));
         }
         b.mass = pc.mass;
-        pc.body_index = physics_->create_body(b);
+        pc.body_index = world_->physics().create_body(b);
         drones_.push_back(de);
     }
 
     ServiceLocator::register_instance<JobSystem>(jobs_);
+    ServiceLocator::register_instance<World>(world_);
 
     try {
         vulkan_->init_window(config_.window_width, config_.window_height, config_.title);
@@ -111,11 +112,11 @@ bool Engine::init() {
 
         lighting_->bake_all(demo_env_radiance, nullptr);
 
-        auto entity = registry_.create();
-        registry_.emplace<TransformComponent>(entity);
-        auto& camera = registry_.emplace<CameraComponent>(entity);
+        auto entity = world_->registry().create();
+        world_->registry().emplace<TransformComponent>(entity);
+        auto& camera = world_->registry().emplace<CameraComponent>(entity);
         camera.primary = true;
-        auto& retro = registry_.emplace<RetroVisualComponent>(entity);
+        auto& retro = world_->registry().emplace<RetroVisualComponent>(entity);
         retro.visual = retro_state_;
 
         std::cout << "Kengine: basic Full HD offscreen + depth + pipeline cache ready\n";
@@ -141,6 +142,11 @@ void Engine::run() {
         float dt   = static_cast<float>(now - last_time);
         last_time  = now;
 
+        // Minimal playable loop (via World + systems in update):
+        //   input (forces/vel on kinematic bodies) →
+        //   physics step (C hot path) →
+        //   sync transforms (ECS) →
+        //   render with current Camera4D (w_slice, hyper_rot, morph)
         update(dt);
         render();
     }
@@ -159,11 +165,12 @@ void Engine::shutdown() {
     frame_graph_.reset();
     swapchain_.reset();
     lighting_.reset();
-    physics_.reset();
+    world_.reset();
     if (vulkan_) vulkan_->shutdown();
     vulkan_.reset();
     jobs_.reset();
     ServiceLocator::unregister<JobSystem>();
+    ServiceLocator::unregister<World>();
 }
 
 void Engine::update(float dt) {
@@ -192,7 +199,7 @@ void Engine::update(float dt) {
     // Player 3D movement: WASD (xy) + QE (z) + RF (w)  --> set kinematic vel
     // ------------------------------------------------------------------
     if (win && player_entity_.valid()) {
-        if (auto* pc = registry_.get<PhysicsComponent>(player_entity_)) {
+        if (auto* pc = world_->registry().get<PhysicsComponent>(player_entity_)) {
             if (pc->kinematic) {
                 const float ps = 3.8f;  // player speed (units/sec)
                 float vx = 0, vy = 0, vz = 0, vw = 0;
@@ -226,16 +233,16 @@ void Engine::update(float dt) {
     // Demo fire (space) - spawns fast kinematic projectiles
     fire_cooldown_ -= dt;
     if (win && glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS && fire_cooldown_ <= 0.0f && player_entity_.valid()) {
-        if (auto* ptc = registry_.get<TransformComponent>(player_entity_)) {
-            if (auto* ppc = registry_.get<PhysicsComponent>(player_entity_)) {
-                auto proj = registry_.create();
-                auto& pt = registry_.emplace<TransformComponent>(proj);
+        if (auto* ptc = world_->registry().get<TransformComponent>(player_entity_)) {
+            if (auto* ppc = world_->registry().get<PhysicsComponent>(player_entity_)) {
+                auto proj = world_->registry().create();
+                auto& pt = world_->registry().emplace<TransformComponent>(proj);
                 pt.position[0] = ptc->position[0];
                 pt.position[1] = ptc->position[1] + 0.12f;
                 pt.position[2] = ptc->position[2];
                 pt.position[3] = ptc->position[3];
 
-                auto& pc = registry_.emplace<PhysicsComponent>(proj);
+                auto& pc = world_->registry().emplace<PhysicsComponent>(proj);
                 pc.mass = 0.08f;
                 pc.kinematic = true;
 
@@ -250,7 +257,7 @@ void Engine::update(float dt) {
                     ppc->velocity[3] * 0.2f
                 );
                 pb.mass = pc.mass;
-                pc.body_index = physics_->create_body(pb);
+                pc.body_index = world_->physics().create_body(pb);
                 fire_cooldown_ = 0.09f;
             }
         }
@@ -258,7 +265,7 @@ void Engine::update(float dt) {
 
     // Runtime gravity control (1/2 for y-grav slice feel, 3/4/5 for w gravity)
     if (win) {
-        if (auto* raw = physics_->raw()) {
+        if (auto* raw = world_->physics().raw()) {
             if (glfwGetKey(win, GLFW_KEY_1) == GLFW_PRESS) { raw->gravity[1] = -6.5f; raw->gravity[3] = 0.0f; }
             if (glfwGetKey(win, GLFW_KEY_2) == GLFW_PRESS) { raw->gravity[1] =  0.0f; raw->gravity[3] = 0.0f; }
             if (glfwGetKey(win, GLFW_KEY_3) == GLFW_PRESS) raw->gravity[3] =  0.9f;
@@ -287,13 +294,13 @@ void Engine::update(float dt) {
         if (glfwGetKey(win, GLFW_KEY_0) == GLFW_PRESS) camera_.adjust_hyper(2,  sms * 0.6f);
     }
 
-    // --- Bidirectional physics sync: ECS <-> ke_phys bodies ---
-    // Pre-step: Transform (and kinematic velocity) -> physics body
-    registry_.view<PhysicsComponent>([this](Entity e, PhysicsComponent& pc) {
+    // --- Playable loop core (input already handled above for player vel/forces) ---
+    // 2. Physics step (C hotpath in World) + 3. sync back to ECS Transforms
+    world_->registry().view<PhysicsComponent>([this](Entity e, PhysicsComponent& pc) {
         if (pc.body_index < 0) return;
-        ke_phys_body* body = physics_->get_body(pc.body_index);
+        ke_phys_body* body = world_->physics().get_body(pc.body_index);
         if (!body) return;
-        if (auto* tc = registry_.get<TransformComponent>(e)) {
+        if (auto* tc = world_->registry().get<TransformComponent>(e)) {
             body->position = ke_vec4_make(tc->position[0], tc->position[1], tc->position[2], tc->position[3]);
             if (pc.kinematic) {
                 body->velocity = ke_vec4_make(pc.velocity[0], pc.velocity[1], pc.velocity[2], pc.velocity[3]);
@@ -301,14 +308,14 @@ void Engine::update(float dt) {
         }
     });
 
-    physics_->step(dt);
+    world_->step_physics(dt);  // C hot path + spatial rebuild
 
     // Post-step: physics body -> TransformComponent (for rendering) + mirror velocity
-    registry_.view<PhysicsComponent>([this](Entity e, PhysicsComponent& pc) {
+    world_->registry().view<PhysicsComponent>([this](Entity e, PhysicsComponent& pc) {
         if (pc.body_index < 0) return;
-        ke_phys_body* body = physics_->get_body(pc.body_index);
+        ke_phys_body* body = world_->physics().get_body(pc.body_index);
         if (!body) return;
-        if (auto* tc = registry_.get<TransformComponent>(e)) {
+        if (auto* tc = world_->registry().get<TransformComponent>(e)) {
             tc->position[0] = body->position.x;
             tc->position[1] = body->position.y;
             tc->position[2] = body->position.z;
@@ -322,17 +329,17 @@ void Engine::update(float dt) {
 
     // Drive retro ship visual from the player physics entity's position
     if (player_entity_.valid()) {
-        if (auto* tc = registry_.get<TransformComponent>(player_entity_)) {
+        if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
             ship_x_ = tc->position[0];
             ship_y_ = tc->position[1];
             // (z/w of player could influence ship_z / ship_w in a future visual pass)
         }
-        if (auto* pc = registry_.get<PhysicsComponent>(player_entity_)) {
+        if (auto* pc = world_->registry().get<PhysicsComponent>(player_entity_)) {
             ship_vel_x_ = pc->velocity[0];
             ship_vel_y_ = pc->velocity[1];
             ship_vel_z_ = pc->velocity[2];
         }
-        if (auto* tc = registry_.get<TransformComponent>(player_entity_)) {
+        if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
             ship_z_ = tc->position[2] + 1.6f;  // visual offset + player z
             ship_w_ = tc->position[3];
         }
@@ -340,7 +347,7 @@ void Engine::update(float dt) {
 
     // Camera follow mode: track player body's position in the projected 3D space
     if (player_entity_.valid()) {
-        if (auto* tc = registry_.get<TransformComponent>(player_entity_)) {
+        if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
             float follow = 0.15f;
             camera_.target[0] = (1.0f - follow) * camera_.target[0] + follow * tc->position[0];
             camera_.target[1] = (1.0f - follow) * camera_.target[1] + follow * (tc->position[1] - 0.25f);
@@ -352,12 +359,12 @@ void Engine::update(float dt) {
 
     // Simple 3D steering for drones (xyz homing + Verlet/damping does the motion)
     if (player_entity_.valid()) {
-        if (auto* ptc = registry_.get<TransformComponent>(player_entity_)) {
+        if (auto* ptc = world_->registry().get<TransformComponent>(player_entity_)) {
             ke_vec3 ppos = ke_vec3_make(ptc->position[0], ptc->position[1], ptc->position[2]);
             for (auto& de : drones_) {
-                auto* dpc = registry_.get<PhysicsComponent>(de);
+                auto* dpc = world_->registry().get<PhysicsComponent>(de);
                 if (!dpc || dpc->body_index < 0 || dpc->kinematic) continue;
-                auto* body = physics_->get_body(dpc->body_index);
+                auto* body = world_->physics().get_body(dpc->body_index);
                 if (!body) continue;
 
                 ke_vec3 epos = ke_vec3_make(body->position.x, body->position.y, body->position.z);
@@ -385,14 +392,14 @@ void Engine::update(float dt) {
 
     // Leverage the spatial hash (3D xyz broadphase) — example: simple separation for bodies near player
     if (player_entity_.valid()) {
-        if (auto* ptc = registry_.get<TransformComponent>(player_entity_)) {
+        if (auto* ptc = world_->registry().get<TransformComponent>(player_entity_)) {
             float px = ptc->position[0], py = ptc->position[1], pz = ptc->position[2];
             int32_t cands[24];
-            int nc = physics_->query_radius(px, py, pz, 2.2f, cands, 24);
+            int nc = world_->physics().query_radius(px, py, pz, 2.2f, cands, 24);
             for (int i = 0; i < nc; ++i) {
                 int bi = cands[i];
                 if (bi == player_body_index_) continue;
-                auto* b = physics_->get_body(bi);
+                auto* b = world_->physics().get_body(bi);
                 if (!b) continue;
                 float dx = b->position.x - px;
                 float dy = b->position.y - py;
@@ -412,9 +419,9 @@ void Engine::update(float dt) {
 
     // Environment: simple arena bounds + bounce/clamp (xyz walls, soft w limits)
     // Applied post-physics so Verlet + hash interactions still feel natural.
-    registry_.view<PhysicsComponent>([this](Entity /*e*/, PhysicsComponent& pc) {
+    world_->registry().view<PhysicsComponent>([this](Entity /*e*/, PhysicsComponent& pc) {
         if (pc.body_index < 0) return;
-        auto* b = physics_->get_body(pc.body_index);
+        auto* b = world_->physics().get_body(pc.body_index);
         if (!b) return;
         const float limx = 2.6f, limy = 2.0f, limz = 1.4f;
         auto reflect = [](float& p, float& v, float lim, float damp = 0.65f) {
@@ -429,7 +436,7 @@ void Engine::update(float dt) {
         if (b->position.w < -1.5f) { b->position.w = -1.5f; if (!pc.kinematic) b->velocity.w *= 0.4f; }
     });
 
-    registry_.view<RetroVisualComponent>([this](Entity /*e*/, RetroVisualComponent& r) {
+    world_->registry().view<RetroVisualComponent>([this](Entity /*e*/, RetroVisualComponent& r) {
         r.visual = retro_state_;
     });
 }

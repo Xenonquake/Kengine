@@ -81,6 +81,7 @@ add_library(kengine STATIC
     src/ecs/registry.cpp
     src/math/vec4d.cpp
     src/physics/physics_world.cpp
+    src/world/world.cpp
     src/vulkan/context.cpp
     src/vulkan/swapchain.cpp
     src/vulkan/vma_allocator.cpp

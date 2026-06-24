@@ -12,6 +12,7 @@ public:
     ~PhysicsWorld();
 
     ke_phys_world* raw() { return world_; }
+    const ke_phys_world* raw() const { return world_; }
 
     void step(float dt);
 

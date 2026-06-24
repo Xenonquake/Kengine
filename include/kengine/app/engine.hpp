@@ -5,6 +5,7 @@
 #include "kengine/ecs/registry.hpp"
 #include "kengine/lighting/spherical_harmonics.hpp"
 #include "kengine/physics/physics_world.hpp"
+#include "kengine/world/world.hpp"
 #include "kengine/render/camera_4d.hpp"
 #include "kengine/render/frame_graph.hpp"
 #include "kengine/render/frame_renderer.hpp"
@@ -41,10 +42,12 @@ public:
     void run();
     void shutdown();
 
-    Registry& registry() { return registry_; }
-    PhysicsWorld& physics() { return *physics_; }
+    Registry& registry() { return world_->registry(); }
+    PhysicsWorld& physics() { return world_->physics(); }
     SHLightingSystem& lighting() { return *lighting_; }
     PipelineManager& pipelines() { return *pipelines_; }
+
+    World& world() { return *world_; }
 
     void set_retro_style(RetroStyle style);
 
@@ -53,11 +56,10 @@ private:
     void render();
 
     EngineConfig config_;
-    Registry registry_;
+    std::shared_ptr<World> world_;
     std::shared_ptr<JobSystem> jobs_;
     std::unique_ptr<VulkanContext> vulkan_;
     std::unique_ptr<Swapchain> swapchain_;
-    std::unique_ptr<PhysicsWorld> physics_;
     std::unique_ptr<SHLightingSystem> lighting_;
     std::unique_ptr<FrameGraph> frame_graph_;
     std::unique_ptr<PostProcessPipeline> post_process_;
