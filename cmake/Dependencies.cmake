@@ -31,3 +31,21 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(stb)
+
+# cglm - lightweight C math library (SIMD friendly) for hot C23 paths
+FetchContent_Declare(
+    cglm
+    GIT_REPOSITORY https://github.com/recp/cglm.git
+    GIT_TAG        v0.9.4
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(cglm)
+
+# GLM - header-only C++ math for ergonomics in C++ systems
+FetchContent_Declare(
+    glm
+    GIT_REPOSITORY https://github.com/g-truc/glm.git
+    GIT_TAG        1.0.1
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(glm)

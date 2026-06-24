@@ -19,7 +19,7 @@ layout(push_constant) uniform PC {
     float w_morph;
     float glow_intensity;
     float time;
-    vec4 hyper_rot;
+    mat4 hyper_rot;  // full 4x4 4D rotation matrix
     vec2 viewport;
     float scanline_strength;
     float pixel_snap;
@@ -45,10 +45,7 @@ vec3 project_morph(vec4 p, float w_focus, float morph) {
 void main() {
     vec4 p = inPos;
     p.w -= pc.w_slice;
-    p = rotate_plane(p, 0, 3, pc.hyper_rot.x + pc.time * 0.3);
-    p = rotate_plane(p, 1, 3, pc.hyper_rot.y + pc.time * 0.2);
-    p = rotate_plane(p, 0, 1, pc.hyper_rot.z);
-    p = rotate_plane(p, 2, 3, pc.hyper_rot.w);
+    p = pc.hyper_rot * p;  // full 4D hyper-rotation
 
     vec3 pos3 = project_morph(p, 2.0, pc.w_morph);
 

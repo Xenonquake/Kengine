@@ -179,6 +179,12 @@ void VulkanContext::create_device() {
     features13.synchronization2 = VK_TRUE;
     features2.pNext             = &features13;
 
+    // For GPU-driven indirect draw + count (culling)
+    vk::PhysicalDeviceVulkan12Features features12{};
+    features12.drawIndirectCount = VK_TRUE;
+    features12.pNext = features2.pNext;
+    features2.pNext = &features12;
+
     // Descriptor indexing (bindless) features - chained if extension is available
     VkPhysicalDeviceDescriptorIndexingFeatures descriptorIndexingFeatures{};
     descriptorIndexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
@@ -200,7 +206,8 @@ void VulkanContext::create_device() {
     std::vector<const char*> device_extensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
-        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
+        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+        VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME
     };
 
     // Query supported extensions so we can optionally enable newer ones like swapchain_maintenance1

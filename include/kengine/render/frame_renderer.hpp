@@ -9,9 +9,13 @@
 #include "kengine/vulkan/context.hpp"
 #include "kengine/vulkan/swapchain.hpp"
 #include "kengine/game/game_entity.hpp"
+#include "kengine/lighting/spherical_harmonics.hpp"
+#include "kengine/render/retro_types.hpp"
 #include <cstdint>
 #include <vulkan/vulkan_raii.hpp>
 #include <vector>
+#include <optional>
+#include <filesystem>
 
 namespace kengine {
 
@@ -19,7 +23,8 @@ class FrameRenderer {
 public:
     FrameRenderer(VulkanContext& ctx, Swapchain& swapchain,
                   PipelineManager& pipelines, PostProcessPipeline& post,
-                  FrameGraph& frame_graph);
+                  FrameGraph& frame_graph,
+                  const std::filesystem::path& shader_dir = {});
     ~FrameRenderer();
 
     void bind_frame_graph_passes();
@@ -62,6 +67,16 @@ public:
     // Update starfield flow from ship's velocity (call every frame after input/physics)
     void update_background_flow(float ship_vx, float ship_vy, float ship_vz, float dt);
 
+    // GPU SH lighting setup + one-time bake compute dispatch support (env bake via sh_bake.comp)
+    void setup_sh_lighting(SHLightingSystem& lighting);
+    void ensure_sh_bake_resources();
+    void dispatch_sh_bake_once(const vk::raii::CommandBuffer& cmd);
+
+    // GPU frustum culling + indirect draw support
+    void ensure_cull_resources();
+    void upload_instances(const Camera4D& cam);
+    void dispatch_cull(const vk::raii::CommandBuffer& cmd, const Camera4D& cam, float aspect);
+
 private:
     void create_sync_objects();
     void create_command_buffers();
@@ -78,6 +93,7 @@ private:
     PipelineManager& pipelines_;
     PostProcessPipeline& post_;
     FrameGraph& frame_graph_;
+    std::filesystem::path shader_dir_;
 
     std::uint32_t sync_index_ = 0;
     std::uint32_t active_sync_index_ = 0;
@@ -99,6 +115,7 @@ private:
     // CPU fences for command buffer reuse, indexed by frame-in-flight
     std::vector<vk::raii::Fence> in_flight_;
     std::vector<vk::raii::CommandBuffer> command_buffers_;
+    std::vector<vk::raii::CommandBuffer> secondary_command_buffers_;  // for multi-threaded recording
 
     vk::raii::Buffer sprite_vertex_buffer_{nullptr};
     vk::raii::DeviceMemory sprite_vertex_memory_{nullptr};
@@ -147,6 +164,57 @@ private:
     void init_game_entities();
     void update_game_entities(float dt);
     void render_game_entities();  // called from update_moving_stars or similar
+
+    // --- GPU SH Bake (L=2 probe grid) ---
+    SHLightingSystem* sh_lighting_ = nullptr;
+    bool sh_bake_done_ = false;
+
+    std::optional<ShaderModule> shader_sh_bake_;
+
+    std::optional<vk::raii::DescriptorSetLayout> sh_bake_desc_layout_;
+    std::optional<vk::raii::PipelineLayout> sh_bake_pipeline_layout_;
+    std::optional<vk::raii::Pipeline> sh_bake_pipeline_;
+
+    // SSBOs for bake (host-visible for easy sync/readback on small data)
+    vk::raii::Buffer sh_samples_buf_{nullptr};
+    vk::raii::DeviceMemory sh_samples_mem_{nullptr};
+    vk::raii::Buffer sh_probe_pos_buf_{nullptr};
+    vk::raii::DeviceMemory sh_probe_pos_mem_{nullptr};
+    vk::raii::Buffer sh_coeffs_buf_{nullptr};
+    vk::raii::DeviceMemory sh_coeffs_mem_{nullptr};
+
+    uint32_t sh_num_probes_ = 0;
+    uint32_t sh_num_samples_ = 0;
+
+    // --- GPU Culling + Indirect ---
+    bool cull_resources_ready_ = false;
+
+    // Input instances for this frame (enemies + bullets + dynamic sprites)
+    std::vector<GpuSpriteInstance> current_instances_;
+
+    // GPU buffers (host visible for simplicity, like SH bake)
+    vk::raii::Buffer instance_buf_{nullptr};
+    vk::raii::DeviceMemory instance_mem_{nullptr};
+    vk::raii::Buffer visible_list_buf_{nullptr};   // compacted uint indices of visible
+    vk::raii::DeviceMemory visible_list_mem_{nullptr};
+    vk::raii::Buffer indirect_cmd_buf_{nullptr};   // VkDrawIndirectCommand (or more)
+    vk::raii::DeviceMemory indirect_cmd_mem_{nullptr};
+    vk::raii::Buffer count_buf_{nullptr};          // uint32 atomic count
+    vk::raii::DeviceMemory count_mem_{nullptr};
+
+    // Base unit quad for instanced drawing (local offsets)
+    vk::raii::Buffer unit_quad_buf_{nullptr};
+    vk::raii::DeviceMemory unit_quad_mem_{nullptr};
+    std::uint32_t unit_quad_vertex_count_ = 6;
+
+    // Cull compute
+    std::optional<ShaderModule> shader_cull_;
+    std::optional<vk::raii::DescriptorSetLayout> cull_desc_layout_;
+    std::optional<vk::raii::PipelineLayout> cull_pipeline_layout_;
+    std::optional<vk::raii::Pipeline> cull_pipeline_;
+
+    uint32_t last_instance_capacity_ = 0;
+    uint32_t last_visible_capacity_ = 0;
 };
 
 } // namespace kengine

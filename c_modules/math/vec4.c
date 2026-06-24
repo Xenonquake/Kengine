@@ -1,5 +1,6 @@
 #include "vec4.h"
 #include <math.h>
+#include <cglm/cglm.h>
 
 ke_vec4 ke_vec4_make(float x, float y, float z, float w) {
     return (ke_vec4){x, y, z, w};
@@ -26,9 +27,9 @@ float ke_vec4_length(ke_vec4 v) {
 }
 
 ke_vec4 ke_vec4_normalize(ke_vec4 v) {
-    float len = ke_vec4_length(v);
-    if (len < 1e-8f) return (ke_vec4){0, 0, 0, 0};
-    return ke_vec4_scale(v, 1.0f / len);
+    vec4 cv = {v.x, v.y, v.z, v.w};
+    glm_vec4_normalize(cv);
+    return (ke_vec4){cv[0], cv[1], cv[2], cv[3]};
 }
 
 ke_vec4 ke_vec4_lerp(ke_vec4 a, ke_vec4 b, float t) {

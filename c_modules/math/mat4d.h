@@ -23,8 +23,13 @@ ke_vec3 ke_mat4d_project_to_3d(ke_vec4 p, float w_focus, float perspective);
 /* Lerp between flat 2D (z=0,w=0) and full 4D projection. morph in [0,1]. */
 ke_vec3 ke_mat4d_project_morph(ke_vec4 p, float w_focus, float perspective, float morph);
 
-/* Build model matrix: 4D translation + per-plane rotations + uniform scale. */
-ke_mat4d ke_mat4d_model(ke_vec4 translation, const float rotations[4], float scale);
+/* Build model matrix: 4D translation + per-plane rotations + uniform scale.
+ * rotations[6] for full SO(4): [0]=xy, [1]=xz, [2]=xw, [3]=yz, [4]=yw, [5]=zw
+ */
+ke_mat4d ke_mat4d_model(ke_vec4 translation, const float rotations[6], float scale);
+
+/* Lerp between two 4D matrices (element-wise, for simple interpolation) */
+ke_mat4d ke_mat4d_lerp(ke_mat4d a, ke_mat4d b, float t);
 
 #ifdef __cplusplus
 }

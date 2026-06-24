@@ -2,6 +2,7 @@
 
 #include "vec4.h"
 #include "mat4.h"
+#include "mat4d.h"
 #include <array>
 
 namespace kengine {
@@ -41,6 +42,42 @@ struct Mat4d {
     }
 
     Vec4d transform(const Vec4d& v) const { return Vec4d(ke_mat4_mul_vec4(m, v.to_c())); }
+};
+
+/* Full 4D hyper-rotation matrix wrapper (SO(4)) */
+struct Mat4d4 {
+    ke_mat4d m = ke_mat4d_identity();
+
+    static Mat4d4 identity() { return Mat4d4{}; }
+
+    /* Compose rotations for all 6 planes. angles[6] = {xy, xz, xw, yz, yw, zw} */
+    static Mat4d4 from_rotations(const float angles[6]) {
+        Mat4d4 r;
+        r.m = ke_mat4d_model(ke_vec4_make(0,0,0,0), angles, 1.0f);
+        return r;
+    }
+
+    static Mat4d4 rotate_plane(int i, int j, float angle) {
+        Mat4d4 r;
+        r.m = ke_mat4d_rotate_plane(i, j, angle);
+        return r;
+    }
+
+    Mat4d4 operator*(const Mat4d4& o) const {
+        Mat4d4 r;
+        r.m = ke_mat4d_mul(m, o.m);
+        return r;
+    }
+
+    Vec4d transform(const Vec4d& v) const {
+        return Vec4d(ke_mat4d_mul_vec4(m, v.to_c()));
+    }
+
+    Mat4d4 lerp(const Mat4d4& o, float t) const {
+        Mat4d4 r;
+        r.m = ke_mat4d_lerp(m, o.m, t);
+        return r;
+    }
 };
 
 } // namespace kengine

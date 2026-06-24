@@ -1,0 +1,88 @@
+#version 450
+// GPU SH L=2 (9 coeff) bake compute pass
+// Mirrors ke_sh_project + ke_sh_basis_eval from C modules.
+// Dispatch: one workgroup per probe (local_size_x=1 for simple correct reduction).
+// Input buffers: directions+weights (shared across probes for env bake).
+// Radiance: hardcoded env function (demo sky+sun) for infinite env; can be extended
+//   to sample a per-probe radiance buffer or texture for scene capture bakes.
+// Output: flat float buffer: for each probe: 27 floats [r0..r8, g0..g8, b0..b8]
+
+layout(local_size_x = 1) in;
+
+layout(std430, binding = 0) readonly buffer SampleBuffer {
+    vec4 dirs_weights[];   // .xyz = direction, .w = solid angle weight
+};
+
+layout(std430, binding = 1) readonly buffer ProbePosBuffer {
+    vec4 probe_positions[]; // xyz + pad, one per probe
+};
+
+layout(std430, binding = 2) writeonly buffer SHCoeffBuffer {
+    float coeffs[];  // size = num_probes * 27
+};
+
+layout(push_constant) uniform BakePC {
+    uint num_probes;
+    uint num_samples;
+    uint pad0;
+    uint pad1;
+} pc;
+
+// Replicate the CPU radiance for the demo env
+float env_radiance(vec3 dir) {
+    float y = dir.y;
+    float sun = pow(max(0.0, y), 32.0);
+    float sky = 0.3 + 0.7 * max(0.0, y);
+    return sun + sky;
+}
+
+// SH basis L=2 exactly matching sh_basis.c + common.glsl
+void sh_basis(vec3 n, out float b[9]) {
+    float x = n.x;
+    float y = n.y;
+    float z = n.z;
+
+    b[0] = 0.28209479177387814;
+    b[1] = 0.48860251190291992 * z;
+    b[2] = 0.48860251190291992 * y;
+    b[3] = 0.48860251190291992 * x;
+    b[4] = 1.0925484305920792 * x * z;
+    b[5] = 1.0925484305920792 * z * y;
+    b[6] = 0.31539156525252005 * (3.0 * y * y - 1.0);
+    b[7] = 1.0925484305920792 * x * y;
+    b[8] = 0.5462742152960396 * (x * x - z * z);
+}
+
+void main() {
+    uint probe = gl_GlobalInvocationID.x;
+    if (probe >= pc.num_probes) return;
+
+    float cr[9], cg[9], cb[9];
+    for (int k = 0; k < 9; ++k) {
+        cr[k] = 0.0; cg[k] = 0.0; cb[k] = 0.0;
+    }
+
+    for (uint s = 0u; s < pc.num_samples; ++s) {
+        vec3 dir = dirs_weights[s].xyz;
+        float w  = dirs_weights[s].w;
+        float L  = env_radiance(normalize(dir));
+
+        float b[9];
+        sh_basis(dir, b);
+
+        for (int k = 0; k < 9; ++k) {
+            float contrib = L * b[k] * w;
+            cr[k] += contrib;
+            cg[k] += contrib;  // replicate for monochromatic env
+            cb[k] += contrib;
+        }
+    }
+
+    // Write interleaved RGB blocks per probe: 27 floats
+    uint base = probe * 27u;
+    for (int k = 0; k < 9; ++k) {
+        coeffs[base + k]      = cr[k];
+        coeffs[base + 9u + k] = cg[k];
+        coeffs[base + 18u + k] = cb[k];
+    }
+}

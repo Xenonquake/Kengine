@@ -23,19 +23,19 @@ enum class RetroPipelineKind {
 
 using RetroPipelineState = RetroVisualState;
 
-/* Must match GLSL push_constant layout (128 bytes). */
+/* Must match GLSL push_constant layout. */
 struct RetroPushConstants {
     float mvp[16];
     float w_slice;
     float w_morph;
     float glow_intensity;
     float time;
-    float hyper_rot[4];   /* xw, yw, xy, zw */
+    float hyper_rot[16];  /* full 4x4 4D rotation matrix (column-major) */
     float viewport[2];
     float scanline_strength;
     float pixel_snap;
     float palette_index;  /* 0=Galaga, 1=GeometryCore, 2=DeathTank */
-    float _pad;
+    float _pad[2];
 };
 
 struct RetroVertex2D {

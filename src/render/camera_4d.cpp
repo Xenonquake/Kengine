@@ -3,6 +3,9 @@
 #include <cstring>
 #include <cmath>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
 namespace kengine {
 
 void Camera4D::compute_mvp(float aspect, float* out_mvp) const {
@@ -29,10 +32,10 @@ void Camera4D::fill_push_constants(RetroPushConstants& pc,
     pc.w_morph            = state.w_morph;
     pc.glow_intensity     = state.glow_intensity;
     pc.time               = time;
-    pc.hyper_rot[0]       = hyper_rot[0];
-    pc.hyper_rot[1]       = hyper_rot[1];
-    pc.hyper_rot[2]       = hyper_rot[2];
-    pc.hyper_rot[3]       = hyper_rot[3];
+    // Copy full 4D hyper rotation matrix (16 floats)
+    for (int i = 0; i < 16; ++i) {
+        pc.hyper_rot[i] = hyper_rot.m.m[i];
+    }
     pc.viewport[0]        = static_cast<float>(width);
     pc.viewport[1]        = static_cast<float>(height);
     pc.scanline_strength  = state.scanline_strength;
@@ -78,10 +81,16 @@ void Camera4D::adjust_slice(float delta) {
     w_slice += delta;
 }
 
-void Camera4D::adjust_hyper(int index, float delta) {
-    if (index >= 0 && index < 4) {
-        hyper_rot[index] += delta;
-    }
+void Camera4D::adjust_hyper(int plane, float delta) {
+    if (plane < 0 || plane > 5) return;
+    // Compose a small rotation in the given plane onto current hyper_rot
+    static const int plane_pairs[6][2] = {
+        {0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}  // xy, xz, xw, yz, yw, zw
+    };
+    int i = plane_pairs[plane][0];
+    int j = plane_pairs[plane][1];
+    Mat4d4 rot = Mat4d4::rotate_plane(i, j, delta);
+    hyper_rot = hyper_rot * rot;  // right-multiply
 }
 
 void Camera4D::reset() {
@@ -89,10 +98,7 @@ void Camera4D::reset() {
     target[0] = 0.0f; target[1] = 0.0f; target[2] = 0.0f;
     up[0] = 0; up[1] = 1; up[2] = 0;
     w_slice = 0.0f;
-    hyper_rot[0] = 0.15f;
-    hyper_rot[1] = 0.25f;
-    hyper_rot[2] = 0.05f;
-    hyper_rot[3] = 0.10f;
+    hyper_rot = Mat4d4::identity();
 }
 
 void Camera4D::chase_ship(const float ship_pos[3], const float ship_forward[3], float dt) {
@@ -155,6 +161,49 @@ void Camera4D::chase_ship(const float ship_pos[3], const float ship_forward[3], 
     up[0] = 0; up[1] = 1; up[2] = 0;
 
     // 4D params (w_slice, hyper_rot) left for background/4D effects only; main gameplay is 3D ship-relative.
+}
+
+void Camera4D::extract_frustum_planes(float aspect, FrustumPlanes& out) const {
+    ke_mat4 proj = ke_mat4_perspective(fov, aspect, near_z, far_z);
+    ke_vec3 e = ke_vec3_make(eye[0], eye[1], eye[2]);
+    ke_vec3 t = ke_vec3_make(target[0], target[1], target[2]);
+    ke_vec3 u = ke_vec3_make(up[0], up[1], up[2]);
+    ke_mat4 view = ke_mat4_look_at(e, t, u);
+    ke_mat4 mvp = ke_mat4_mul(proj, view);
+
+    // Extract planes from mvp (column-major in m[16])
+    // Left:   m3 + m0
+    // Right:  m3 - m0
+    // Bottom: m3 + m1
+    // Top:    m3 - m1
+    // Near:   m3 + m2   (or depending on proj z convention; our near/far)
+    // Far:    m3 - m2
+    const float* m = mvp.m;
+
+    auto set_plane = [&](int i, float a, float b, float c, float d) {
+        out.planes[i][0] = a;
+        out.planes[i][1] = b;
+        out.planes[i][2] = c;
+        out.planes[i][3] = d;
+        // normalize for consistent radius tests
+        float len = std::sqrt(a*a + b*b + c*c);
+        if (len > 1e-6f) {
+            out.planes[i][0] /= len;
+            out.planes[i][1] /= len;
+            out.planes[i][2] /= len;
+            out.planes[i][3] /= len;
+        }
+    };
+
+    // Row/column: assuming m[0..3] = col0 etc. Standard extraction for column major MVP:
+    // plane coeffs from matrix rows (transposed view in some refs)
+    // Common working extraction (tested in many engines):
+    set_plane(0, m[3] + m[0], m[7] + m[4], m[11] + m[8],  m[15] + m[12]); // left
+    set_plane(1, m[3] - m[0], m[7] - m[4], m[11] - m[8],  m[15] - m[12]); // right
+    set_plane(2, m[3] + m[1], m[7] + m[5], m[11] + m[9],  m[15] + m[13]); // bottom
+    set_plane(3, m[3] - m[1], m[7] - m[5], m[11] - m[9],  m[15] - m[13]); // top
+    set_plane(4, m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]); // near (adjust sign if reversed depth)
+    set_plane(5, m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]); // far
 }
 
 } // namespace kengine

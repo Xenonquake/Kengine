@@ -1,0 +1,80 @@
+#version 450
+// GPU Frustum Culler + Indirect prep
+// Input: instance buffer (positions in projected 3D)
+// Output: visible instance indices (compacted) + atomic count
+//         + one DrawIndirectCommand written by first thread after sync
+// Frustum planes passed via push (or UBO later).
+
+layout(local_size_x = 64) in;
+
+struct GpuSpriteInstance {
+    vec3  pos;
+    float scale;
+    uint  color;
+    vec3  vel;
+    uint  type;
+};
+
+layout(std430, binding = 0) readonly buffer InstanceBuf {
+    GpuSpriteInstance instances[];
+};
+
+layout(std430, binding = 1) buffer VisibleBuf {
+    uint visible[];   // compacted instance indices
+};
+
+layout(std430, binding = 2) buffer IndirectCmd {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+} cmd;
+
+layout(std430, binding = 3) buffer CountBuf {
+    uint count;
+};
+
+layout(push_constant) uniform CullPC {
+    uint  num_instances;
+    // 6 planes (nx,ny,nz,d) inward
+    vec4  planes[6];
+    uint  phase;   // 0 = cull+count, 1 = finalize indirect from count
+    uint  pad;
+} pc;
+
+// Test if a sphere at p with radius r is inside frustum
+bool is_visible(vec3 p, float r) {
+    for (int i = 0; i < 6; ++i) {
+        vec3 n = pc.planes[i].xyz;
+        float d = pc.planes[i].w;
+        float dist = dot(n, p) + d;
+        if (dist < -r) return false;
+    }
+    return true;
+}
+
+void main() {
+    if (pc.phase == 1u) {
+        // Finalize: write indirect command using the count produced by phase 0
+        if (gl_GlobalInvocationID.x == 0u) {
+            uint vis = count; // the atomic written by previous dispatch + barrier
+            cmd.vertexCount   = 6u;
+            cmd.instanceCount = vis;
+            cmd.firstVertex   = 0u;
+            cmd.firstInstance = 0u;
+        }
+        return;
+    }
+
+    // Phase 0: main frustum cull
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.num_instances) return;
+
+    GpuSpriteInstance inst = instances[idx];
+    float r = max(0.01, inst.scale * 0.6);
+
+    if (is_visible(inst.pos, r)) {
+        uint slot = atomicAdd(count, 1u);
+        visible[slot] = idx;
+    }
+}

@@ -58,13 +58,16 @@ ke_vec3 ke_mat4d_project_morph(ke_vec4 p, float w_focus, float perspective, floa
     };
 }
 
-ke_mat4d ke_mat4d_model(ke_vec4 translation, const float rotations[4], float scale) {
+ke_mat4d ke_mat4d_model(ke_vec4 translation, const float rotations[6], float scale) {
     ke_mat4d r = ke_mat4d_identity();
     ke_mat4d rot = ke_mat4d_identity();
-    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(0, 3, rotations[0]), rot); /* xw */
-    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(1, 3, rotations[1]), rot); /* yw */
-    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(0, 1, rotations[2]), rot); /* xy */
-    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(2, 3, rotations[3]), rot); /* zw */
+    /* Full SO(4) planes in a reasonable composition order */
+    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(0, 1, rotations[0]), rot); /* xy */
+    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(0, 2, rotations[1]), rot); /* xz */
+    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(0, 3, rotations[2]), rot); /* xw */
+    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(1, 2, rotations[3]), rot); /* yz */
+    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(1, 3, rotations[4]), rot); /* yw */
+    rot = ke_mat4d_mul(ke_mat4d_rotate_plane(2, 3, rotations[5]), rot); /* zw */
     r = rot;
     r.m[0]  *= scale; r.m[1]  *= scale; r.m[2]  *= scale;
     r.m[4]  *= scale; r.m[5]  *= scale; r.m[6]  *= scale;
@@ -73,5 +76,13 @@ ke_mat4d ke_mat4d_model(ke_vec4 translation, const float rotations[4], float sca
     r.m[13] = translation.y;
     r.m[14] = translation.z;
     r.m[15] = translation.w;
+    return r;
+}
+
+ke_mat4d ke_mat4d_lerp(ke_mat4d a, ke_mat4d b, float t) {
+    ke_mat4d r;
+    for (int i = 0; i < 16; ++i) {
+        r.m[i] = a.m[i] + (b.m[i] - a.m[i]) * t;
+    }
     return r;
 }

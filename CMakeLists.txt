@@ -23,6 +23,7 @@ add_library(kengine_c_math STATIC
     c_modules/math/gauss_legendre.c
 )
 target_include_directories(kengine_c_math PUBLIC c_modules/math)
+target_link_libraries(kengine_c_math PUBLIC cglm)
 kengine_apply_c23_flags(kengine_c_math)
 
 add_library(kengine_c_sh STATIC
@@ -31,7 +32,7 @@ add_library(kengine_c_sh STATIC
     c_modules/sh/sh_eval.c
 )
 target_include_directories(kengine_c_sh PUBLIC c_modules/sh c_modules/math)
-target_link_libraries(kengine_c_sh PUBLIC kengine_c_math)
+target_link_libraries(kengine_c_sh PUBLIC kengine_c_math cglm)
 kengine_apply_c23_flags(kengine_c_sh)
 
 add_library(kengine_c_physics STATIC
@@ -39,7 +40,7 @@ add_library(kengine_c_physics STATIC
     c_modules/physics/spatial_hash.c
 )
 target_include_directories(kengine_c_physics PUBLIC c_modules/physics c_modules/math)
-target_link_libraries(kengine_c_physics PUBLIC kengine_c_math)
+target_link_libraries(kengine_c_physics PUBLIC kengine_c_math cglm)
 kengine_apply_c23_flags(kengine_c_physics)
 
 # ---------------------------------------------------------------------------
@@ -109,6 +110,7 @@ target_include_directories(kengine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/c_modules/physics
     ${vma_SOURCE_DIR}/include
     ${stb_SOURCE_DIR}
+    ${glm_SOURCE_DIR}   # GLM for C++ code
 )
 target_link_libraries(kengine PUBLIC
     Vulkan::Vulkan
@@ -116,6 +118,7 @@ target_link_libraries(kengine PUBLIC
     kengine_c_math
     kengine_c_sh
     kengine_c_physics
+    glm::glm
 )
 kengine_apply_compiler_flags(kengine)
 

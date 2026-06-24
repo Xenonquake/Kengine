@@ -2,6 +2,7 @@
 
 #include "kengine/render/retro_pipeline.hpp"
 #include "kengine/render/retro_types.hpp"
+#include "kengine/math/vec4d.hpp"
 #include <cstdint>
 
 namespace kengine {
@@ -19,9 +20,9 @@ struct Camera4D {
     float near_z = 0.1f;
     float far_z  = 200.0f;
 
-    // 4D slice + hyperplane rotations (radians). Fed directly to shaders.
-    float w_slice     = 0.0f;
-    float hyper_rot[4] = {0.15f, 0.25f, 0.05f, 0.10f}; // xw, yw, xy, zw
+    // 4D slice + full hyper-rotation matrix (SO(4))
+    float w_slice = 0.0f;
+    Mat4d4 hyper_rot = Mat4d4::identity();  // composable 4D rotations
 
     // Simple velocity for controls (integrated outside)
     float move_speed   = 4.0f;
@@ -42,12 +43,23 @@ struct Camera4D {
     // Basic control helpers (call from input loop with dt)
     void move(float dx, float dy, float dz);      // local strafe (x right, y up, z forward)
     void adjust_slice(float delta);
-    void adjust_hyper(int index, float delta);    // index 0..3
+    // Adjust a specific plane rotation (for legacy, composes on current)
+    void adjust_hyper(int plane, float delta);    // plane 0..5 for xy,xz,xw,yz,yw,zw
     void reset();
 
     // 3D Star Fox style chase camera: positions eye behind/above ship, target ahead.
     // ship_pos/forward are in the projected 3D space. Call every frame.
     void chase_ship(const float ship_pos[3], const float ship_forward[3], float dt);
+
+    // Frustum for GPU culling (in the final projected 3D space).
+    // planes[6][4]: each [nx,ny,nz, d] satisfying dot(n, p) + d == 0 for points on plane.
+    // Order: left, right, bottom, top, near, far. Planes point inward.
+    struct FrustumPlanes {
+        float planes[6][4];
+    };
+
+    // Extract 6 frustum planes from current view+proj (using the 3D mvp).
+    void extract_frustum_planes(float aspect, FrustumPlanes& out) const;
 };
 
 } // namespace kengine

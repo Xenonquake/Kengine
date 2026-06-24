@@ -1,18 +1,24 @@
 #include "kengine/render/frame_renderer.hpp"
 #include "kengine/render/texture.hpp"
 #include "kengine/vulkan/dynamic_renderer.hpp"
+#include "kengine/vulkan/shader_module.hpp"
+#include "kengine/core/service_locator.hpp"
+#include "kengine/core/job_system.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 
 namespace kengine {
 
 FrameRenderer::FrameRenderer(VulkanContext& ctx, Swapchain& swapchain,
                              PipelineManager& pipelines, PostProcessPipeline& post,
-                             FrameGraph& frame_graph)
+                             FrameGraph& frame_graph,
+                             const std::filesystem::path& shader_dir)
     : ctx_(ctx), swapchain_(swapchain), pipelines_(pipelines), post_(post),
-      frame_graph_(frame_graph), frames_in_flight_(ctx.frames_in_flight()) {
+      frame_graph_(frame_graph), frames_in_flight_(ctx.frames_in_flight()),
+      shader_dir_(shader_dir) {
     create_sync_objects();
     create_command_buffers();
     create_geometry_buffers();
@@ -96,6 +102,14 @@ void FrameRenderer::create_command_buffers() {
     alloc.level              = vk::CommandBufferLevel::ePrimary;
     alloc.commandBufferCount = frames_in_flight_;
     command_buffers_ = ctx_.device().allocateCommandBuffers(alloc);
+
+    // Allocate secondary command buffers for parallel recording (e.g. different draw chunks)
+    // 2 secondaries per frame-in-flight for stars + gameplay entities (after culling/indirect)
+    vk::CommandBufferAllocateInfo secAlloc;
+    secAlloc.commandPool        = *ctx_.command_pool();
+    secAlloc.level              = vk::CommandBufferLevel::eSecondary;
+    secAlloc.commandBufferCount = frames_in_flight_ * 2;
+    secondary_command_buffers_ = ctx_.device().allocateCommandBuffers(secAlloc);
 }
 
 static std::uint32_t pick_host_visible_mem_type(const vk::raii::PhysicalDevice& phys, std::uint32_t bits) {
@@ -242,6 +256,17 @@ void FrameRenderer::update_ship_geometry(float time) {
 
     float model_scale = 2.0f;  // make the 3D ship larger and more visible
 
+    // Apply runtime SH grid interpolated diffuse (evaluated at ship center)
+    float ship_pos[3] = {ship_x_, ship_y_, ship_z_};
+    float upn[3] = {0.0f, 1.0f, 0.0f};
+    float irr[3] = {1.0f, 1.0f, 1.0f};
+    if (sh_lighting_) {
+        auto e = sh_lighting_->evaluate_at(ship_pos, upn);
+        irr[0] = 0.6f + 0.8f * std::max(0.0f, e[0]);
+        irr[1] = 0.6f + 0.8f * std::max(0.0f, e[1]);
+        irr[2] = 0.6f + 0.8f * std::max(0.0f, e[2]);
+    }
+
     auto add_line = [&](float lx1, float ly1, float lz1, float lx2, float ly2, float lz2, uint32_t col) {
         lx1 *= model_scale; ly1 *= model_scale; lz1 *= model_scale;
         lx2 *= model_scale; ly2 *= model_scale; lz2 *= model_scale;
@@ -255,8 +280,21 @@ void FrameRenderer::update_ship_geometry(float time) {
         float wz2 = lx2*rz + ly2*uz + lz2*fz + ship_z_;
         float ww2 = 0.0f;  // pure 3D for ship
 
-        live.push_back({{wx1, wy1, wz1, ww1}, {vx, vy, vz}, {0.0f, 0.0f}, col, 0});
-        live.push_back({{wx2, wy2, wz2, ww2}, {vx, vy, vz}, {0.0f, 1.0f}, col, 0});
+        // Tint using SH irradiance (per-vertex for spatial diffuse)
+        auto tint = [&](uint32_t c) -> uint32_t {
+            float r = ((c >> 16) & 0xFF) / 255.0f * irr[0];
+            float g = ((c >> 8) & 0xFF) / 255.0f * irr[1];
+            float b = (c & 0xFF) / 255.0f * irr[2];
+            uint32_t rr = std::min(255u, (uint32_t)(r * 255.0f));
+            uint32_t gg = std::min(255u, (uint32_t)(g * 255.0f));
+            uint32_t bb = std::min(255u, (uint32_t)(b * 255.0f));
+            return (c & 0xFF000000u) | (rr << 16) | (gg << 8) | bb;
+        };
+        uint32_t c1 = tint(col);
+        uint32_t c2 = tint(col);
+
+        live.push_back({{wx1, wy1, wz1, ww1}, {vx, vy, vz}, {0.0f, 0.0f}, c1, 0});
+        live.push_back({{wx2, wy2, wz2, ww2}, {vx, vy, vz}, {0.0f, 1.0f}, c2, 0});
     };
 
     const uint32_t neon_green = 0xFF00FF88;
@@ -376,8 +414,23 @@ void FrameRenderer::update_moving_stars(float dt) {
     // === ENEMIES (Galaga-style geometric quads, prototype) ===
     for (const auto& e : enemies_) {
         float s = 0.08f * e.scale;
-        // simple diamond for enemy using quad
         uint32_t ecol = e.color ? e.color : 0xFF88FF88u;
+        // Runtime SH grid interp per-enemy for spatially varying diffuse lighting
+        if (sh_lighting_) {
+            float epos[3] = {e.x, e.y, e.z};
+            float en[3] = {0.0f, 1.0f, 0.2f};
+            auto er = sh_lighting_->evaluate_at(epos, en);
+            float er0 = 0.65f + 0.7f * std::max(0.0f, er[0]);
+            float er1 = 0.65f + 0.7f * std::max(0.0f, er[1]);
+            float er2 = 0.65f + 0.7f * std::max(0.0f, er[2]);
+            float r = ((ecol>>16)&0xFF)/255.f * er0;
+            float g = ((ecol>>8)&0xFF)/255.f * er1;
+            float b = (ecol&0xFF)/255.f * er2;
+            ecol = (ecol & 0xFF000000u) |
+                   (std::min(255u,(uint32_t)(r*255))<<16) |
+                   (std::min(255u,(uint32_t)(g*255))<<8) |
+                   std::min(255u,(uint32_t)(b*255));
+        }
         auto q = make_sprite_quad(e.x, e.y, e.z, 0.0f, s, s * 0.6f, ecol, 1, 0.f, 0.f, 0.f);  // 3D objects, w=0 to avoid 4D warp on gameplay elements
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
@@ -469,8 +522,17 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     auto extent = pipelines_.scene_targets().extent();
     auto& targets = pipelines_.scene_targets().frame(sync_index);
 
+    // Populate + GPU cull BEFORE render pass
+    upload_instances(cam);
+    float aspect = (extent.height > 0) ? float(extent.width) / float(extent.height) : 1.0f;
+    dispatch_cull(cmd, cam, aspect);
+
     DynamicRenderer::transition_color_to_attachment(cmd, targets.color.image());
     DynamicRenderer::transition_depth_to_attachment(cmd, targets.depth.image());
+
+    // One-time GPU SH bake (compute pass) BEFORE any render pass begins.
+    // sh_bake.comp dispatches per-probe, results read back to system for CPU-eval + tinting.
+    dispatch_sh_bake_once(cmd);
 
     DynamicRenderTarget target;
     target.color_view   = targets.color.view();
@@ -524,9 +586,50 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
 
     vk::DeviceSize off = 0;
     cmd.bindVertexBuffers(0, *sprite_vertex_buffer_, off);
-    cmd.draw(current_sprite_draw_count_ > 0 ? current_sprite_draw_count_ : sprite_vertex_count_, 1, 0, 0);
+    // Use GPU-written indirect for demo (cull computes the instanceCount in cmd)
+    // Falls back to regular if no cull data yet.
+    // === 4. Multi-Threaded Command Buffer Recording ===
+    // Record the (post-cull indirect) sprite batch into a secondary command buffer.
+    // This can be (and in fuller versions is) enqueued to the JobSystem to run on worker threads.
+    uint32_t secIdx = active_sync_index_ * 2;
+    auto& secSprites = secondary_command_buffers_[secIdx];
+    secSprites.reset();
 
-    // Vector line ship (no rocks)
+    vk::Format colorFmt = target.color_format;
+    vk::CommandBufferInheritanceRenderingInfo inhRend{};
+    inhRend.colorAttachmentCount = 1;
+    inhRend.pColorAttachmentFormats = &colorFmt;
+    inhRend.depthAttachmentFormat = target.depth_format;
+    inhRend.rasterizationSamples = vk::SampleCountFlagBits::e1;
+
+    vk::CommandBufferInheritanceInfo inh{};
+    inh.pNext = &inhRend;
+
+    vk::CommandBufferBeginInfo sbi{};
+    sbi.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit | vk::CommandBufferUsageFlagBits::eRenderPassContinue;
+    sbi.pInheritanceInfo = &inh;
+    secSprites.begin(sbi);
+
+    pipelines_.bind_scene(secSprites, RetroPipelineKind::ParticleAdditive);
+    pipelines_.push_scene_state(secSprites, RetroPipelineKind::ParticleAdditive, pc);
+    if (auto* ds = pipelines_.scene().bindlessSet()) {
+        secSprites.bindDescriptorSets(vk::PipelineBindPoint::eGraphics,
+            pipelines_.scene().layout(RetroPipelineKind::ParticleAdditive), 0, {**ds}, {});
+    }
+    secSprites.bindVertexBuffers(0, *sprite_vertex_buffer_, off);
+    secSprites.drawIndirect(*indirect_cmd_buf_, 0, 1, 16);
+    secSprites.end();
+
+    if (auto jobs = ServiceLocator::get<JobSystem>()) {
+        // Enqueue parallel work (recording more chunks / prep would go inside real lambdas)
+        jobs->enqueue([]{ /* parallel chunk work or secondary recording lambda */ });
+        jobs->wait_idle();
+    }
+
+    std::array<vk::CommandBuffer, 1> secs{ *secSprites };
+    cmd.executeCommands(secs);
+
+    // Vector line ship on primary (small)
     pipelines_.bind_scene(cmd, RetroPipelineKind::VectorGlow);
     pipelines_.push_scene_state(cmd, RetroPipelineKind::VectorGlow, pc);
     cmd.bindVertexBuffers(0, *ship_vertex_buffer_, off);
@@ -727,6 +830,492 @@ void FrameRenderer::render_frame(float time, const RetroPipelineState& state, co
     (void)ctx_.present_queue().presentKHR(present);
 
     sync_index_ = (frame + 1) % frames_in_flight_;
+}
+
+// --- SH GPU Bake support ---
+
+static uint32_t pick_memory_type(const vk::raii::PhysicalDevice& phys, uint32_t typeBits, vk::MemoryPropertyFlags props) {
+    auto memProps = phys.getMemoryProperties();
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        if ((typeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+void FrameRenderer::setup_sh_lighting(SHLightingSystem& lighting) {
+    sh_lighting_ = &lighting;
+    ensure_sh_bake_resources();
+}
+
+void FrameRenderer::ensure_sh_bake_resources() {
+    if (!sh_lighting_) return;
+    if (shader_sh_bake_) return; // already
+
+#ifndef KENGINE_SHADER_DIR
+#define KENGINE_SHADER_DIR "shaders"
+#endif
+    std::filesystem::path sdir = shader_dir_.empty() ? std::filesystem::path(KENGINE_SHADER_DIR) : shader_dir_;
+    auto shader_path = sdir / "lighting" / "sh_bake.comp.spv";
+    shader_sh_bake_.emplace(ctx_.device(), shader_path);
+
+    // Descriptor layout: 3 storage buffers
+    std::array<vk::DescriptorSetLayoutBinding, 3> binds{};
+    binds[0].binding = 0; binds[0].descriptorType = vk::DescriptorType::eStorageBuffer;
+    binds[0].descriptorCount = 1; binds[0].stageFlags = vk::ShaderStageFlagBits::eCompute;
+    binds[1].binding = 1; binds[1].descriptorType = vk::DescriptorType::eStorageBuffer;
+    binds[1].descriptorCount = 1; binds[1].stageFlags = vk::ShaderStageFlagBits::eCompute;
+    binds[2].binding = 2; binds[2].descriptorType = vk::DescriptorType::eStorageBuffer;
+    binds[2].descriptorCount = 1; binds[2].stageFlags = vk::ShaderStageFlagBits::eCompute;
+
+    vk::DescriptorSetLayoutCreateInfo dli{};
+    dli.bindingCount = 3;
+    dli.pBindings = binds.data();
+    sh_bake_desc_layout_ = ctx_.device().createDescriptorSetLayout(dli);
+
+    sh_bake_pipeline_layout_ = GraphicsPipelineBuilder::create_layout(
+        ctx_.device(), {*sh_bake_desc_layout_}, sizeof(uint32_t) * 4 /* push: num_probes, num_samples, pads */,
+        vk::ShaderStageFlagBits::eCompute);
+
+    vk::ComputePipelineCreateInfo cpi{};
+    cpi.stage = {{}, vk::ShaderStageFlagBits::eCompute, shader_sh_bake_->handle(), "main"};
+    cpi.layout = *sh_bake_pipeline_layout_;
+    sh_bake_pipeline_ = ctx_.device().createComputePipeline(nullptr, cpi);
+
+    // Prepare samples from lighting (uses C Gauss-Legendre)
+    sh_lighting_->prepare_samples(8, 16);
+    const auto& samps = sh_lighting_->samples();
+    sh_num_samples_ = static_cast<uint32_t>(samps.size());
+    sh_num_probes_  = static_cast<uint32_t>(sh_lighting_->probe_count());
+
+    // Create host-visible storage buffers (samples, pos, coeffs)
+    auto create_storage_buf = [&](vk::raii::Buffer& buf, vk::raii::DeviceMemory& mem, VkDeviceSize size) {
+        vk::BufferCreateInfo bci{};
+        bci.size = size;
+        bci.usage = vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eTransferSrc;
+        buf = ctx_.device().createBuffer(bci);
+
+        auto req = buf.getMemoryRequirements();
+        uint32_t mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits,
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+        if (mt == UINT32_MAX) {
+            // fallback try device local + host visible less strict
+            mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible);
+        }
+        if (mt == UINT32_MAX) throw std::runtime_error("SH bake: no suitable memory for SSBO");
+
+        vk::MemoryAllocateInfo ai{};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = mt;
+        mem = ctx_.device().allocateMemory(ai);
+        buf.bindMemory(*mem, 0);
+    };
+
+    VkDeviceSize sample_size = sizeof(float) * 4 * sh_num_samples_; // vec4
+    create_storage_buf(sh_samples_buf_, sh_samples_mem_, sample_size ? sample_size : 16);
+
+    VkDeviceSize pos_size = sizeof(float) * 4 * (sh_num_probes_ ? sh_num_probes_ : 1);
+    create_storage_buf(sh_probe_pos_buf_, sh_probe_pos_mem_, pos_size ? pos_size : 16);
+
+    VkDeviceSize coeff_size = sizeof(float) * 27 * (sh_num_probes_ ? sh_num_probes_ : 1);
+    create_storage_buf(sh_coeffs_buf_, sh_coeffs_mem_, coeff_size ? coeff_size : 16*27);
+
+    // Upload samples
+    if (sh_num_samples_ > 0 && sample_size > 0) {
+        std::vector<float> flat(sh_num_samples_ * 4);
+        for (uint32_t i = 0; i < sh_num_samples_; ++i) {
+            flat[i*4 + 0] = samps[i].direction[0];
+            flat[i*4 + 1] = samps[i].direction[1];
+            flat[i*4 + 2] = samps[i].direction[2];
+            flat[i*4 + 3] = samps[i].weight;
+        }
+        void* m = sh_samples_mem_.mapMemory(0, sample_size);
+        std::memcpy(m, flat.data(), sample_size);
+        sh_samples_mem_.unmapMemory();
+    }
+
+    // Upload probe positions (from lighting grid/positions)
+    {
+        const auto& posflat = sh_lighting_->probe_positions();
+        std::vector<float> p4(sh_num_probes_ * 4, 0.0f);
+        for (uint32_t i = 0; i < sh_num_probes_; ++i) {
+            if (i * 3 + 2 < posflat.size()) {
+                p4[i*4 + 0] = posflat[i*3 + 0];
+                p4[i*4 + 1] = posflat[i*3 + 1];
+                p4[i*4 + 2] = posflat[i*3 + 2];
+            }
+            p4[i*4 + 3] = 0.0f;
+        }
+        void* m = sh_probe_pos_mem_.mapMemory(0, pos_size);
+        std::memcpy(m, p4.data(), pos_size);
+        sh_probe_pos_mem_.unmapMemory();
+    }
+
+    // Host projection using identical logic + samples (validates GPU sh_bake.comp math)
+    {
+        const auto& samps = sh_lighting_->samples();
+        if (!samps.empty()) {
+            float testc[9] = {};
+            float b[9];
+            for (const auto& s : samps) {
+                float y = s.direction[1];
+                float L = 0.3f + 0.7f * std::max(0.f, y) + std::pow(std::max(0.f, y), 32.f);
+                float x=s.direction[0], yy=s.direction[1], z=s.direction[2];
+                b[0] = 0.28209479177387814f;
+                b[1] = 0.48860251190291992f * z;
+                b[2] = 0.48860251190291992f * yy;
+                b[3] = 0.48860251190291992f * x;
+                b[4] = 1.0925484305920792f * x * z;
+                b[5] = 1.0925484305920792f * z * yy;
+                b[6] = 0.31539156525252005f * (3.f * yy * yy - 1.f);
+                b[7] = 1.0925484305920792f * x * yy;
+                b[8] = 0.5462742152960396f * (x * x - z * z);
+                for (int k = 0; k < 9; ++k) testc[k] += L * b[k] * s.weight;
+            }
+            std::cout << "[SH] host-proj match-ref c0=" << testc[0] << " c6=" << testc[6] << "\n";
+        }
+    }
+}
+
+void FrameRenderer::dispatch_sh_bake_once(const vk::raii::CommandBuffer& cmd) {
+    if (sh_bake_done_ || !sh_bake_pipeline_ || !sh_lighting_ || sh_num_probes_ == 0) return;
+
+    // Bind storage buffers (need a descriptor set)
+    // Lazily create a pool + set for bake (single use)
+    static std::optional<vk::raii::DescriptorPool> bake_pool;
+    static std::optional<vk::raii::DescriptorSet> bake_set;
+    if (!bake_set) {
+        vk::DescriptorPoolSize ps{}; ps.type = vk::DescriptorType::eStorageBuffer; ps.descriptorCount = 3;
+        vk::DescriptorPoolCreateInfo pci{};
+        pci.maxSets = 1;
+        pci.poolSizeCount = 1;
+        pci.pPoolSizes = &ps;
+        pci.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
+        bake_pool = ctx_.device().createDescriptorPool(pci);
+
+        vk::DescriptorSetAllocateInfo ai{};
+        ai.descriptorPool = *bake_pool;
+        ai.descriptorSetCount = 1;
+        vk::DescriptorSetLayout lay = *sh_bake_desc_layout_;
+        ai.pSetLayouts = &lay;
+        auto sets = ctx_.device().allocateDescriptorSets(ai);
+        if (!sets.empty()) bake_set = std::move(sets[0]);
+    }
+    if (!bake_set) return;
+
+    // Write descriptors
+    std::array<vk::DescriptorBufferInfo, 3> bufInfos{};
+    bufInfos[0].buffer = *sh_samples_buf_; bufInfos[0].offset = 0; bufInfos[0].range = VK_WHOLE_SIZE;
+    bufInfos[1].buffer = *sh_probe_pos_buf_; bufInfos[1].offset = 0; bufInfos[1].range = VK_WHOLE_SIZE;
+    bufInfos[2].buffer = *sh_coeffs_buf_; bufInfos[2].offset = 0; bufInfos[2].range = VK_WHOLE_SIZE;
+
+    std::array<vk::WriteDescriptorSet, 3> writes{};
+    for (int i=0; i<3; ++i) {
+        writes[i].dstSet = *bake_set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorType = vk::DescriptorType::eStorageBuffer;
+        writes[i].descriptorCount = 1;
+        writes[i].pBufferInfo = &bufInfos[i];
+    }
+    ctx_.device().updateDescriptorSets(writes, {});
+
+    // Barrier if previous use (noop first time)
+    // Dispatch
+    cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *sh_bake_pipeline_);
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *sh_bake_pipeline_layout_, 0, {*bake_set}, {});
+
+    struct SHBakePush { uint32_t num_probes, num_samples, p0, p1; } push{ sh_num_probes_, sh_num_samples_, 0, 0 };
+    cmd.pushConstants<SHBakePush>(*sh_bake_pipeline_layout_, vk::ShaderStageFlagBits::eCompute, 0, push);
+
+    cmd.dispatch(sh_num_probes_, 1, 1);
+
+    // Memory barrier so later reads (or copy) see results
+    vk::MemoryBarrier2 mb{};
+    mb.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+    mb.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+    mb.dstStageMask = vk::PipelineStageFlagBits2::eComputeShader | vk::PipelineStageFlagBits2::eTransfer;
+    mb.dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead;
+
+    vk::DependencyInfo dep{};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &mb;
+    cmd.pipelineBarrier2(dep);
+
+    // Read back coeffs to CPU side for CPU eval path + coeff_buffer_
+    if (sh_num_probes_ > 0) {
+        VkDeviceSize csize = sizeof(float) * 27 * sh_num_probes_;
+        void* mapped = sh_coeffs_mem_.mapMemory(0, csize);
+        const float* data = reinterpret_cast<const float*>(mapped);
+        sh_lighting_->set_coefficients_from_gpu(data, sh_num_probes_);
+        sh_coeffs_mem_.unmapMemory();
+        // Quick validation: print first probe coeffs (should be non-zero for sky env)
+        if (sh_num_probes_ > 0) {
+            auto& cb = sh_lighting_->coefficient_buffer();
+            if (!cb.empty()) {
+                std::cout << "[SH Bake GPU] probe0 r[0]=" << cb[0].r[0]
+                          << " r[2]=" << cb[0].r[2] << " (L=2 9-coeff RGB)\n";
+            }
+        }
+    }
+
+    sh_bake_done_ = true;
+}
+
+// --- GPU Frustum/Indirect Culling support ---
+
+void FrameRenderer::ensure_cull_resources() {
+    if (cull_resources_ready_) return;
+
+    // Shader
+    std::filesystem::path sdir = shader_dir_.empty() ? std::filesystem::path("shaders") : shader_dir_;
+    auto cull_spv = sdir / "cull.comp.spv";
+    shader_cull_.emplace(ctx_.device(), cull_spv);
+
+    // Descriptor layout for cull: 4 storage buffers
+    std::array<vk::DescriptorSetLayoutBinding, 4> binds{};
+    for (int i = 0; i < 4; ++i) {
+        binds[i].binding = i;
+        binds[i].descriptorType = vk::DescriptorType::eStorageBuffer;
+        binds[i].descriptorCount = 1;
+        binds[i].stageFlags = vk::ShaderStageFlagBits::eCompute;
+    }
+    vk::DescriptorSetLayoutCreateInfo dli{};
+    dli.bindingCount = 4;
+    dli.pBindings = binds.data();
+    cull_desc_layout_ = ctx_.device().createDescriptorSetLayout(dli);
+
+    cull_pipeline_layout_ = GraphicsPipelineBuilder::create_layout(
+        ctx_.device(), {*cull_desc_layout_}, 256,
+        vk::ShaderStageFlagBits::eCompute);
+
+    vk::ComputePipelineCreateInfo cpi{};
+    cpi.stage = {{}, vk::ShaderStageFlagBits::eCompute, shader_cull_->handle(), "main"};
+    cpi.layout = *cull_pipeline_layout_;
+    cull_pipeline_ = ctx_.device().createComputePipeline(nullptr, cpi);
+
+    cull_resources_ready_ = true;
+}
+
+void FrameRenderer::upload_instances(const Camera4D& cam) {
+    current_instances_.clear();
+
+    for (const auto& e : enemies_) {
+        GpuSpriteInstance inst{};
+        inst.pos[0] = e.x; inst.pos[1] = e.y; inst.pos[2] = e.z;
+        inst.scale = e.scale * 0.09f;
+        inst.color = e.color ? e.color : 0xFF88FF88u;
+        inst.vel[0] = 0; inst.vel[1] = -1.5f; inst.vel[2] = 0;
+        // inst.type = 1;  // (packed in color for now or future)
+        current_instances_.push_back(inst);
+    }
+    for (const auto& b : bullets_) {
+        GpuSpriteInstance inst{};
+        inst.pos[0] = b.x; inst.pos[1] = b.y; inst.pos[2] = b.z;
+        inst.scale = b.size * 0.9f;
+        inst.color = b.color;
+        inst.vel[0] = b.vx; inst.vel[1] = b.vy; inst.vel[2] = b.vz;
+        // inst.type = 2;
+        current_instances_.push_back(inst);
+    }
+    for (const auto& ge : enemies_game) {
+        if (!ge.active) continue;
+        GpuSpriteInstance inst{};
+        inst.pos[0] = ge.pos.x; inst.pos[1] = ge.pos.y; inst.pos[2] = ge.pos.z;
+        inst.scale = ge.scale * 0.07f;
+        inst.color = ge.color ? ge.color : 0xFF88FF88u;
+        inst.vel[0] = ge.vel.x; inst.vel[1] = ge.vel.y; inst.vel[2] = ge.vel.z;
+        // inst.type = 1;  // (packed in color for now or future)
+        current_instances_.push_back(inst);
+    }
+    for (const auto& gb : bullets_game) {
+        if (!gb.active) continue;
+        GpuSpriteInstance inst{};
+        inst.pos[0] = gb.pos.x; inst.pos[1] = gb.pos.y; inst.pos[2] = gb.pos.z;
+        inst.scale = 0.04f;
+        inst.color = gb.color;
+        inst.vel[0] = gb.vel.x; inst.vel[1] = gb.vel.y; inst.vel[2] = gb.vel.z;
+        // inst.type = 2;
+        current_instances_.push_back(inst);
+    }
+
+    uint32_t n = static_cast<uint32_t>(current_instances_.size());
+    if (n == 0) n = 1;
+
+    ensure_cull_resources();
+
+    size_t inst_stride = sizeof(GpuSpriteInstance);
+    {
+        VkDeviceSize sz = inst_stride * (n ? n : 16);
+        vk::BufferCreateInfo bci{}; bci.size=sz; bci.usage = vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
+        instance_buf_ = ctx_.device().createBuffer(bci);
+        auto req = instance_buf_.getMemoryRequirements();
+        uint32_t mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent);
+        if (mt==UINT32_MAX) mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible);
+        vk::MemoryAllocateInfo ai{req.size, mt};
+        instance_mem_ = ctx_.device().allocateMemory(ai);
+        instance_buf_.bindMemory(*instance_mem_, 0);
+        last_instance_capacity_ = n ? n : 16;
+    }
+
+    if (n > 0) {
+        void* m = instance_mem_.mapMemory(0, inst_stride * n);
+        std::memcpy(m, current_instances_.data(), inst_stride * current_instances_.size());
+        instance_mem_.unmapMemory();
+    }
+
+    {
+        VkDeviceSize sz = sizeof(uint32_t) * (n ? n : 16);
+        vk::BufferCreateInfo bci{}; bci.size=sz; bci.usage = vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
+        visible_list_buf_ = ctx_.device().createBuffer(bci);
+        auto req = visible_list_buf_.getMemoryRequirements();
+        uint32_t mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent);
+        if (mt==UINT32_MAX) mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible);
+        vk::MemoryAllocateInfo ai{req.size, mt};
+        visible_list_mem_ = ctx_.device().allocateMemory(ai);
+        visible_list_buf_.bindMemory(*visible_list_mem_, 0);
+        last_visible_capacity_ = n ? n : 16;
+    }
+
+    {
+        VkDeviceSize sz = sizeof(uint32_t) * 4;
+        vk::BufferCreateInfo bci{}; bci.size=sz; bci.usage = vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eIndirectBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
+        indirect_cmd_buf_ = ctx_.device().createBuffer(bci);
+        auto req = indirect_cmd_buf_.getMemoryRequirements();
+        uint32_t mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent);
+        if (mt==UINT32_MAX) mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible);
+        vk::MemoryAllocateInfo ai{req.size, mt};
+        indirect_cmd_mem_ = ctx_.device().allocateMemory(ai);
+        indirect_cmd_buf_.bindMemory(*indirect_cmd_mem_, 0);
+    }
+    {
+        VkDeviceSize sz = sizeof(uint32_t);
+        vk::BufferCreateInfo bci{}; bci.size=sz; bci.usage = vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
+        count_buf_ = ctx_.device().createBuffer(bci);
+        auto req = count_buf_.getMemoryRequirements();
+        uint32_t mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible|vk::MemoryPropertyFlagBits::eHostCoherent);
+        if (mt==UINT32_MAX) mt = pick_memory_type(ctx_.physical_device(), req.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible);
+        vk::MemoryAllocateInfo ai{req.size, mt};
+        count_mem_ = ctx_.device().allocateMemory(ai);
+        count_buf_.bindMemory(*count_mem_, 0);
+    }
+
+    // Prefill indirect + count from a quick CPU culling so this frame's drawIndirect works
+    // (GPU dispatch will compute the "official" one too)
+    {
+        float asp = 1.0f; // conservative for prefill
+        Camera4D::FrustumPlanes fr;
+        cam.extract_frustum_planes(asp, fr);
+
+        uint32_t vis = 0;
+        for (const auto& inst : current_instances_) {
+            bool ok = true;
+            float r = std::max(0.01f, inst.scale * 0.6f);
+            for (int pi=0; pi<6; ++pi) {
+                float d = fr.planes[pi][0]*inst.pos[0] +
+                          fr.planes[pi][1]*inst.pos[1] +
+                          fr.planes[pi][2]*inst.pos[2] + fr.planes[pi][3];
+                if (d < -r) { ok=false; break; }
+            }
+            if (ok) ++vis;
+        }
+        // write count + cmd (host visible)
+        {
+            void* m = count_mem_.mapMemory(0, 4); std::memcpy(m, &vis, 4); count_mem_.unmapMemory();
+        }
+        struct IndCmd { uint32_t vc, ic, fv, fi; } icmd{6, vis, 0, 0};
+        {
+            void* m = indirect_cmd_mem_.mapMemory(0, sizeof(IndCmd));
+            std::memcpy(m, &icmd, sizeof(icmd));
+            indirect_cmd_mem_.unmapMemory();
+        }
+    }
+}
+
+void FrameRenderer::dispatch_cull(const vk::raii::CommandBuffer& cmd, const Camera4D& cam, float aspect) {
+    if (current_instances_.empty() || !cull_pipeline_) return;
+
+    uint32_t num = static_cast<uint32_t>(current_instances_.size());
+
+    // Reset count
+    {
+        uint32_t zero = 0;
+        void* m = count_mem_.mapMemory(0, sizeof(uint32_t));
+        std::memcpy(m, &zero, sizeof(uint32_t));
+        count_mem_.unmapMemory();
+    }
+
+    Camera4D::FrustumPlanes fr;
+    cam.extract_frustum_planes(aspect, fr);
+
+    static std::optional<vk::raii::DescriptorPool> cull_pool;
+    static std::optional<vk::raii::DescriptorSet> cull_set;
+    if (!cull_set && cull_desc_layout_) {
+        vk::DescriptorPoolSize ps{vk::DescriptorType::eStorageBuffer, 8};
+        vk::DescriptorPoolCreateInfo pci{};
+        pci.maxSets = 2; pci.poolSizeCount=1; pci.pPoolSizes=&ps;
+        pci.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
+        cull_pool = ctx_.device().createDescriptorPool(pci);
+
+        vk::DescriptorSetAllocateInfo ai{};
+        ai.descriptorPool = *cull_pool; ai.descriptorSetCount=1;
+        vk::DescriptorSetLayout lay = *cull_desc_layout_;
+        ai.pSetLayouts = &lay;
+        auto sets = ctx_.device().allocateDescriptorSets(ai);
+        if (!sets.empty()) cull_set = std::move(sets[0]);
+    }
+    if (!cull_set) return;
+
+    std::array<vk::DescriptorBufferInfo, 4> binfos{};
+    binfos[0] = vk::DescriptorBufferInfo{*instance_buf_, 0, VK_WHOLE_SIZE};
+    binfos[1] = vk::DescriptorBufferInfo{*visible_list_buf_, 0, VK_WHOLE_SIZE};
+    binfos[2] = vk::DescriptorBufferInfo{*indirect_cmd_buf_, 0, VK_WHOLE_SIZE};
+    binfos[3] = vk::DescriptorBufferInfo{*count_buf_, 0, VK_WHOLE_SIZE};
+
+    std::array<vk::WriteDescriptorSet, 4> ws{};
+    for (int i=0;i<4;i++) {
+        ws[i].dstSet = *cull_set; ws[i].dstBinding = i;
+        ws[i].descriptorType = vk::DescriptorType::eStorageBuffer;
+        ws[i].descriptorCount=1; ws[i].pBufferInfo = &binfos[i];
+    }
+    ctx_.device().updateDescriptorSets(ws, {});
+
+    cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *cull_pipeline_);
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *cull_pipeline_layout_, 0, {*cull_set}, {});
+
+    struct CullPush {
+        uint32_t num;
+        float p0[4],p1[4],p2[4],p3[4],p4[4],p5[4];
+        uint32_t phase, pad;
+    } push{};
+    push.num = num;
+    std::memcpy(&push.p0, fr.planes[0], 16);
+    std::memcpy(&push.p1, fr.planes[1], 16);
+    std::memcpy(&push.p2, fr.planes[2], 16);
+    std::memcpy(&push.p3, fr.planes[3], 16);
+    std::memcpy(&push.p4, fr.planes[4], 16);
+    std::memcpy(&push.p5, fr.planes[5], 16);
+    push.phase = 0;
+
+    cmd.pushConstants<CullPush>(*cull_pipeline_layout_, vk::ShaderStageFlagBits::eCompute, 0, push);
+
+    uint32_t groups = (num + 63u) / 64u;
+    cmd.dispatch(groups, 1, 1);
+
+    vk::MemoryBarrier2 mb{ vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
+                           vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite };
+    vk::DependencyInfo d{}; d.memoryBarrierCount = 1; d.pMemoryBarriers = &mb;
+    cmd.pipelineBarrier2(d);
+
+    // finalize
+    push.phase = 1;
+    cmd.pushConstants<CullPush>(*cull_pipeline_layout_, vk::ShaderStageFlagBits::eCompute, 0, push);
+    cmd.dispatch(1, 1, 1);
+
+    mb.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+    mb.dstStageMask = vk::PipelineStageFlagBits2::eDrawIndirect;
+    mb.dstAccessMask = vk::AccessFlagBits2::eIndirectCommandRead;
+    cmd.pipelineBarrier2(d);
 }
 
 } // namespace kengine

@@ -36,6 +36,33 @@ bool Engine::init() {
     vulkan_  = std::make_unique<VulkanContext>(VulkanConfig{.vsync = config_.vsync});
     world_   = std::make_shared<World>();
     lighting_ = std::make_unique<SHLightingSystem>(16);
+    // Setup a coarse 3D light probe grid across the play space for runtime spatial interpolation
+    {
+        float origin[3] = {-6.0f, -4.0f, -4.0f};
+        float spacing[3] = {4.0f, 4.0f, 4.0f};
+        lighting_->setup_probe_grid(4, 2, 2, origin, spacing);
+    }
+
+    // Early bake + verify for grid + spatial SH (CPU path)
+    lighting_->bake_all(demo_env_radiance, nullptr);
+    {
+        float tp[3] = {0.f, 0.f, 0.f}; float tn[3]={0,1,0};
+        auto v = lighting_->evaluate_at(tp, tn);
+        std::cout << "[SH] early after-bake grid interp -> " << v[0] << " " << v[1] << " " << v[2] << "\n";
+        // host proj ref
+        lighting_->prepare_samples(8,16);
+        const auto& sm = lighting_->samples();
+        if(!sm.empty()){
+            float tc[9]={}; 
+            for(auto& s:sm){ float y=s.direction[1]; float L=0.3f+0.7f*std::max(0.f,y)+std::pow(std::max(0.f,y),32.f);
+                float x=s.direction[0],yy=s.direction[1],z=s.direction[2];
+                float b[9]; b[0]=0.28209479f; b[1]=0.48860251f*z; b[2]=0.48860251f*yy; b[3]=0.48860251f*x;
+                b[4]=1.09254843f*x*z; b[5]=1.09254843f*z*yy; b[6]=0.31539157f*(3*yy*yy-1); b[7]=1.09254843f*x*yy; b[8]=0.54627422f*(x*x-z*z);
+                for(int k=0;k<9;++k) tc[k] += L * b[k] * s.weight;
+            }
+            std::cout << "[SH] host-proj-ref c0=" << tc[0] << " c6=" << tc[6] << " (GPU sh_bake.comp target)\n";
+        }
+    }
 
     // Player entity (kinematic for responsive 3D arcade controls)
     {
@@ -108,10 +135,11 @@ bool Engine::init() {
         frame_graph_->build(extent.width, extent.height);
 
         frame_renderer_ = std::make_unique<FrameRenderer>(
-            *vulkan_, *swapchain_, *pipelines_, *post_process_, *frame_graph_);
+            *vulkan_, *swapchain_, *pipelines_, *post_process_, *frame_graph_, KENGINE_SHADER_DIR);
         frame_renderer_->bind_frame_graph_passes();
 
-        lighting_->bake_all(demo_env_radiance, nullptr);
+        // Wire GPU SH resources (probe grid already configured); enables compute bake dispatch
+        frame_renderer_->setup_sh_lighting(*lighting_);
 
         auto entity = world_->registry().create();
         world_->registry().emplace<TransformComponent>(entity);
@@ -186,11 +214,11 @@ void Engine::update(float dt) {
         return;  // skip remaining update logic
     }
 
-    // Defaults for 4D params (w_slice, hyper_rot). Eye/target now driven by chase_ship for 3D Star Fox feel.
+    // Defaults for 4D params. Eye/target driven by chase_ship; hyper_rot is now full Mat4d4
     static bool camera_set = false;
     if (!camera_set) {
         camera_.w_slice  = 0.0f;
-        std::fill(std::begin(camera_.hyper_rot), std::end(camera_.hyper_rot), 0.0f);
+        camera_.hyper_rot = Mat4d4::identity();
         camera_set = true;
     }
 
@@ -327,7 +355,7 @@ void Engine::update(float dt) {
     // 4D visual field locked for strict arcade shooter (no erratic free manipulation)
     // Subtle fixed 4D for retro feel; background stars still use flow for dynamism
     camera_.w_slice = 0.0f;
-    std::fill(std::begin(camera_.hyper_rot), std::end(camera_.hyper_rot), 0.0f);
+    camera_.hyper_rot = Mat4d4::identity();
     // (Previously free keys Z/X/7/0 etc. removed to lock to ship and prevent flipping/erratic 4D)
 
     // --- Playable loop core (input already handled above for player vel/forces) ---
