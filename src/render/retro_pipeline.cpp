@@ -76,9 +76,12 @@ RetroPipelineSet::RetroPipelineSet(const vk::raii::Device& device, PipelineCache
       shader_particle_vert_(device, spv_path(shader_dir, "retro/particle_additive.vert")),
       shader_particle_frag_(device, spv_path(shader_dir, "retro/particle_additive.frag")),
       shader_composite_frag_(device, spv_path(shader_dir, "retro/retro_composite.frag")),
-      shader_fullscreen_vert_(device, spv_path(shader_dir, "common/fullscreen.vert")) {
+      shader_fullscreen_vert_(device, spv_path(shader_dir, "common/fullscreen.vert")),
+      shader_star_mesh_vert_(device, spv_path(shader_dir, "retro/star_mesh.vert")),
+      shader_star_mesh_frag_(device, spv_path(shader_dir, "retro/star_mesh.frag")) {
 
     createBindlessResources();
+    createStarBufferLayout();
 
     const RetroPipelineKind kinds[] = {
         RetroPipelineKind::Sprite2D,
@@ -86,6 +89,7 @@ RetroPipelineSet::RetroPipelineSet(const vk::raii::Device& device, PipelineCache
         RetroPipelineKind::VectorGlow,
         RetroPipelineKind::ParticleAdditive,
         RetroPipelineKind::RetroComposite,
+        RetroPipelineKind::StarMesh,
         RetroPipelineKind::Fullscreen
     };
 
@@ -93,6 +97,14 @@ RetroPipelineSet::RetroPipelineSet(const vk::raii::Device& device, PipelineCache
         std::vector<vk::DescriptorSetLayout> setLayouts;
         if (bindlessLayout_) {
             setLayouts.push_back(*bindlessLayout_);
+        }
+        if (kind == RetroPipelineKind::StarMesh && starBufferLayout_) {
+            // add set 1 for star instances (set 0 is bindless if present)
+            if (setLayouts.size() == 0) {
+                // if no bindless, we still need to provide empty for set 0? or adjust
+                // For simplicity, assume bindless or handle in draw
+            }
+            setLayouts.push_back(*starBufferLayout_);  // will be set 1
         }
         layouts_.emplace(kind, GraphicsPipelineBuilder::create_layout(
             device_, setLayouts, sizeof(RetroPushConstants),
@@ -136,6 +148,21 @@ vk::raii::Pipeline RetroPipelineSet::create_pipeline(RetroPipelineKind kind) {
     case RetroPipelineKind::Fullscreen:
         // Use a compatible frag that only consumes loc 0 (vUV) from fullscreen.vert
         desc = desc_fullscreen(formats_, shader_fullscreen_vert_, shader_composite_frag_, BlendMode::Opaque);
+        break;
+    case RetroPipelineKind::StarMesh:
+        // Simple 3D mesh for stars (positions only, instanced)
+        desc = base_desc(formats_);
+        desc.vertex_shader   = &shader_star_mesh_vert_;
+        desc.fragment_shader = &shader_star_mesh_frag_;
+        desc.bindings  = {{0, sizeof(float) * 3, vk::VertexInputRate::eVertex}};
+        desc.attributes = {
+            {0, 0, vk::Format::eR32G32B32Sfloat, 0}
+        };
+        desc.blend = BlendMode::Additive;
+        desc.depth_test = true;
+        desc.depth_write = true;
+        desc.topology = vk::PrimitiveTopology::eTriangleList;
+        // We will use set 1 for star instance SSBO
         break;
     }
 
@@ -197,6 +224,21 @@ void RetroPipelineSet::createBindlessResources() {
     if (!sets.empty()) {
         bindlessSet_ = std::move(sets[0]);
     }
+}
+
+void RetroPipelineSet::createStarBufferLayout() {
+    // SSBO for star instance data (set 1, binding 0)
+    vk::DescriptorSetLayoutBinding bind{};
+    bind.binding = 0;
+    bind.descriptorType = vk::DescriptorType::eStorageBuffer;
+    bind.descriptorCount = 1;
+    bind.stageFlags = vk::ShaderStageFlagBits::eVertex;
+
+    vk::DescriptorSetLayoutCreateInfo layoutCI{};
+    layoutCI.bindingCount = 1;
+    layoutCI.pBindings = &bind;
+
+    starBufferLayout_ = device_.createDescriptorSetLayout(layoutCI);
 }
 
 void RetroPipelineSet::updateTexture(uint32_t index, vk::ImageView view, vk::Sampler sampler) {

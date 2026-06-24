@@ -18,6 +18,7 @@ enum class RetroPipelineKind {
     VectorGlow,
     ParticleAdditive,
     RetroComposite,
+    StarMesh,
     Fullscreen
 };
 
@@ -61,6 +62,9 @@ public:
 
     vk::raii::Pipeline& get(RetroPipelineKind kind);
     vk::raii::PipelineLayout& layout(RetroPipelineKind kind);
+    const vk::raii::DescriptorSetLayout* starBufferLayout() const {
+        return starBufferLayout_ ? &*starBufferLayout_ : nullptr;
+    }
 
     const DynamicRenderingFormats& formats() const { return formats_; }
 
@@ -87,6 +91,8 @@ private:
     ShaderModule shader_particle_frag_;
     ShaderModule shader_composite_frag_;
     ShaderModule shader_fullscreen_vert_;
+    ShaderModule shader_star_mesh_vert_;
+    ShaderModule shader_star_mesh_frag_;
 
     std::unordered_map<RetroPipelineKind, vk::raii::Pipeline> pipelines_;
     std::unordered_map<RetroPipelineKind, vk::raii::PipelineLayout> layouts_;
@@ -97,7 +103,11 @@ private:
     std::optional<vk::raii::DescriptorSet> bindlessSet_;
     std::vector<vk::raii::Sampler> textureSamplers_; // keep alive
 
+    // For star mesh instance SSBO (set 1)
+    std::optional<vk::raii::DescriptorSetLayout> starBufferLayout_;
+
     void createBindlessResources();
+    void createStarBufferLayout();
 };
 
 } // namespace kengine

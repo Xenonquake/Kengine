@@ -67,6 +67,10 @@ public:
     // Update starfield flow from ship's velocity (call every frame after input/physics)
     void update_background_flow(float ship_vx, float ship_vy, float ship_vz, float dt);
 
+    // 3D star model support
+    bool loadStarMesh();
+    void updateStarInstances();
+
     // GPU SH lighting setup + one-time bake compute dispatch support (env bake via sh_bake.comp)
     void setup_sh_lighting(SHLightingSystem& lighting);
     void ensure_sh_bake_resources();
@@ -144,7 +148,7 @@ private:
 
     // Dedicated high-density starfield (separate from gameplay entities)
     struct Star {
-        float x, y, z;      // z is depth (negative = far ahead, increases toward camera)
+        float x, y, z;      // z negative = far ahead (in front of player FOV), increases toward camera
         float w;            // light 4D layer variation
         float speed;
         float size;
@@ -154,7 +158,7 @@ private:
 
     struct Starfield {
         std::vector<Star> stars;
-        int max_stars = 900; // target 500-1250 for good density on black background
+        int max_stars = 256; // reduced for performance and density control
 
         void init(float space_width = 9.0f, float space_height = 6.5f);
         void update(float dt, float player_x, float player_y, float player_z,
@@ -232,6 +236,21 @@ private:
 
     uint32_t last_instance_capacity_ = 0;
     uint32_t last_visible_capacity_ = 0;
+
+    // 3D star mesh loaded from StarPoint.glb
+    struct StarMeshData {
+        vk::raii::Buffer vertexBuf{nullptr};
+        vk::raii::DeviceMemory vertexMem{nullptr};
+        vk::raii::Buffer indexBuf{nullptr};
+        vk::raii::DeviceMemory indexMem{nullptr};
+        uint32_t indexCount = 0;
+        uint32_t vertexCount = 0;
+    } starMesh_;
+
+    // SSBO for star instances (pos + scale)
+    vk::raii::Buffer starInstanceBuf_{nullptr};
+    vk::raii::DeviceMemory starInstanceMem_{nullptr};
+    uint32_t starInstanceCount_ = 0;
 };
 
 } // namespace kengine

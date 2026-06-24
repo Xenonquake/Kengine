@@ -49,6 +49,8 @@ kengine_apply_c23_flags(kengine_c_physics)
 set(KENGINE_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 set(KENGINE_SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 
+set(KENGINE_ASSET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+
 file(GLOB_RECURSE KENGINE_SHADER_SOURCES
     CONFIGURE_DEPENDS
     "${KENGINE_SHADER_DIR}/*.comp"
@@ -111,6 +113,7 @@ target_include_directories(kengine PUBLIC
     ${vma_SOURCE_DIR}/include
     ${stb_SOURCE_DIR}
     ${glm_SOURCE_DIR}   # GLM for C++ code
+    ${tinygltf_SOURCE_DIR}  # tinygltf for .glb model loading
 )
 target_link_libraries(kengine PUBLIC
     Vulkan::Vulkan
@@ -126,6 +129,7 @@ target_compile_definitions(kengine PUBLIC
     VK_HPP_DISPATCH_LOADER_DYNAMIC=1
     VK_HPP_RAII_ENABLED=1
     KENGINE_SHADER_DIR="${KENGINE_SHADER_OUTPUT_DIR}"
+    KENGINE_ASSET_DIR="${KENGINE_ASSET_DIR}"
     KENGINE_CACHE_DIR="${CMAKE_BINARY_DIR}/cache"
 )
 

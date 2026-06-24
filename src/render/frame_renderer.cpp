@@ -10,6 +10,13 @@
 #include <iostream>
 #include <stdexcept>
 
+#define TINYGLTF_IMPLEMENTATION
+#define TINYGLTF_NO_STB_IMAGE
+#define TINYGLTF_NO_STB_IMAGE_WRITE
+#include <tiny_gltf.h>
+
+#include <glm/glm.hpp>
+
 namespace kengine {
 
 FrameRenderer::FrameRenderer(VulkanContext& ctx, Swapchain& swapchain,
@@ -191,12 +198,18 @@ static std::vector<RetroVertex4D> make_sprite_quad(float x, float y, float z, fl
 // ===================================================================
 
 void FrameRenderer::Starfield::init(float space_width, float space_height) {
+    (void)space_width; (void)space_height; // now computed relative to FOV / ahead dist
     stars.resize(max_stars);
     for (int i = 0; i < max_stars; ++i) {
         float r = (float)i / max_stars * 6.28f * 3.0f;
-        stars[i].x = sinf(r) * (space_width * (0.35f + (i % 9) * 0.09f));
-        stars[i].y = cosf(r * 0.65f) * (space_height * (0.45f + (i % 7) * 0.07f));
-        stars[i].z = -14.0f - (i % 17) * 0.55f;   // Spawn much farther back for strong rush
+        // Spawn narrower and ahead of typical player FOV so they enter view from front
+        float dist_factor = 12.0f + (i % 13) * 0.4f; // variety in ahead distance
+        float fov_scale = 0.35f;
+        float spawn_w = dist_factor * fov_scale * 1.1f;
+        float spawn_h = dist_factor * fov_scale * 0.85f;
+        stars[i].x = sinf(r) * spawn_w * 0.6f + (i % 5 - 2) * 0.3f;
+        stars[i].y = cosf(r * 0.65f) * spawn_h * 0.6f + (i % 3 - 1) * 0.2f;
+        stars[i].z = -dist_factor;   // negative = ahead of player
         stars[i].w = (i % 6) * 0.13f;
         stars[i].speed = 5.2f + (i % 9) * 0.65f;   // Fast forward rush
         stars[i].size = 0.0019f + (i % 5) * 0.00028f; // Small base size
@@ -219,11 +232,18 @@ void FrameRenderer::Starfield::update(float dt, float player_x, float player_y, 
         s.x += flow_x * dt * parallax;
         s.y += flow_y * dt * (parallax * 0.72f);
 
-        // Respawn far ahead when passed the player/camera
+        // Respawn ahead of the player's FOV so stars come into view from the front
         if (s.z > player_z + 1.8f) {
-            s.z = -15.5f - (rand() % 11) * 0.7f;
-            s.x = player_x + ((rand() % 2000) / 1000.0f - 1.0f) * 10.5f;
-            s.y = player_y + ((rand() % 2000) / 1000.0f - 1.0f) * 7.5f;
+            float ahead_dist = 16.0f + (rand() % 7);  // 16-22 units ahead
+            s.z = player_z - ahead_dist;
+
+            // Narrow spawn range so they start inside/near the view frustum at spawn distance
+            // Tuned for ~45deg FOV: lateral spread ~ 0.35 * distance
+            float fov_scale = 0.35f;
+            float spawn_w = ahead_dist * fov_scale * 1.1f;
+            float spawn_h = ahead_dist * fov_scale * 0.85f;
+            s.x = player_x + ((rand() % 2000) / 1000.0f - 1.0f) * spawn_w;
+            s.y = player_y + ((rand() % 2000) / 1000.0f - 1.0f) * spawn_h;
             s.w = (rand() % 8) * 0.11f;
 
             // Carry a bit of flow for continuity
@@ -270,11 +290,167 @@ void FrameRenderer::Starfield::append_vertices(std::vector<RetroVertex4D>& out_v
     }
 }
 
+// Load 3D star mesh (StarPoint.glb - white sphere exported from Blender)
+bool FrameRenderer::loadStarMesh() {
+    starMesh_ = {};
+
+    std::string assetPath = std::string(KENGINE_ASSET_DIR) + "/models/StarPoint.glb";
+
+    tinygltf::TinyGLTF loader;
+    tinygltf::Model model;
+    std::string err;
+    std::string warn;
+
+    bool ret = loader.LoadBinaryFromFile(&model, &err, &warn, assetPath);
+    if (!warn.empty()) {
+        std::cerr << "[StarMesh] Warn: " << warn << "\n";
+    }
+    if (!ret) {
+        std::cerr << "[StarMesh] Failed to load " << assetPath << " : " << err << "\n";
+        return false;
+    }
+
+    if (model.meshes.empty() || model.meshes[0].primitives.empty()) {
+        std::cerr << "[StarMesh] No mesh in glb\n";
+        return false;
+    }
+
+    auto& prim = model.meshes[0].primitives[0];
+
+    // Get POSITION accessor
+    auto posIt = prim.attributes.find("POSITION");
+    if (posIt == prim.attributes.end()) {
+        std::cerr << "[StarMesh] No POSITION attribute\n";
+        return false;
+    }
+
+    auto& posAcc = model.accessors[posIt->second];
+    auto& posBufView = model.bufferViews[posAcc.bufferView];
+    auto& posBuf = model.buffers[posBufView.buffer];
+
+    const float* posData = reinterpret_cast<const float*>(
+        posBuf.data.data() + posBufView.byteOffset + posAcc.byteOffset);
+
+    uint32_t vcount = posAcc.count;
+    std::vector<float> positions(vcount * 3);
+    for (uint32_t i = 0; i < vcount; ++i) {
+        positions[i*3 + 0] = posData[i*3 + 0];
+        positions[i*3 + 1] = posData[i*3 + 1];
+        positions[i*3 + 2] = posData[i*3 + 2];
+    }
+
+    // Indices
+    std::vector<uint32_t> indices;
+    if (prim.indices >= 0) {
+        auto& idxAcc = model.accessors[prim.indices];
+        auto& idxBufView = model.bufferViews[idxAcc.bufferView];
+        auto& idxBuf = model.buffers[idxBufView.buffer];
+
+        indices.resize(idxAcc.count);
+        if (idxAcc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
+            const uint16_t* idata = reinterpret_cast<const uint16_t*>(
+                idxBuf.data.data() + idxBufView.byteOffset + idxAcc.byteOffset);
+            for (size_t i=0; i<idxAcc.count; ++i) indices[i] = idata[i];
+        } else if (idxAcc.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
+            const uint32_t* idata = reinterpret_cast<const uint32_t*>(
+                idxBuf.data.data() + idxBufView.byteOffset + idxAcc.byteOffset);
+            for (size_t i=0; i<idxAcc.count; ++i) indices[i] = idata[i];
+        } else {
+            std::cerr << "[StarMesh] Unsupported index type\n";
+            return false;
+        }
+    } else {
+        // no indices, create sequential
+        indices.resize(vcount);
+        for (uint32_t i=0; i<vcount; ++i) indices[i] = i;
+    }
+
+    starMesh_.indexCount = static_cast<uint32_t>(indices.size());
+    starMesh_.vertexCount = vcount;
+
+    // Create vertex buffer (vec3 positions)
+    vk::DeviceSize vsize = sizeof(float) * 3 * vcount;
+    vk::BufferCreateInfo vbci{};
+    vbci.size = vsize;
+    vbci.usage = vk::BufferUsageFlagBits::eVertexBuffer;
+    starMesh_.vertexBuf = ctx_.device().createBuffer(vbci);
+
+    auto vreq = starMesh_.vertexBuf.getMemoryRequirements();
+    uint32_t vmt = pick_host_visible_mem_type(ctx_.physical_device(), vreq.memoryTypeBits);
+    if (vmt == UINT32_MAX) vmt = 0;
+
+    vk::MemoryAllocateInfo vai{};
+    vai.allocationSize = vreq.size;
+    vai.memoryTypeIndex = vmt;
+    starMesh_.vertexMem = ctx_.device().allocateMemory(vai);
+    starMesh_.vertexBuf.bindMemory(*starMesh_.vertexMem, 0);
+
+    void* vmap = starMesh_.vertexMem.mapMemory(0, vsize);
+    std::memcpy(vmap, positions.data(), vsize);
+    starMesh_.vertexMem.unmapMemory();
+
+    // Index buffer
+    vk::DeviceSize isize = sizeof(uint32_t) * indices.size();
+    vk::BufferCreateInfo ibci{};
+    ibci.size = isize;
+    ibci.usage = vk::BufferUsageFlagBits::eIndexBuffer;
+    starMesh_.indexBuf = ctx_.device().createBuffer(ibci);
+
+    auto ireq = starMesh_.indexBuf.getMemoryRequirements();
+    uint32_t imt = pick_host_visible_mem_type(ctx_.physical_device(), ireq.memoryTypeBits);
+    if (imt == UINT32_MAX) imt = 0;
+
+    vk::MemoryAllocateInfo iai{};
+    iai.allocationSize = ireq.size;
+    iai.memoryTypeIndex = imt;
+    starMesh_.indexMem = ctx_.device().allocateMemory(iai);
+    starMesh_.indexBuf.bindMemory(*starMesh_.indexMem, 0);
+
+    void* imap = starMesh_.indexMem.mapMemory(0, isize);
+    std::memcpy(imap, indices.data(), isize);
+    starMesh_.indexMem.unmapMemory();
+
+    std::cout << "[StarMesh] Loaded " << vcount << " verts, " << indices.size() << " indices from " << assetPath << "\n";
+    return true;
+}
+
+// Update star instance SSBO from current starfield
+void FrameRenderer::updateStarInstances() {
+    if (!starfield_.stars.empty()) {
+        starInstanceCount_ = static_cast<uint32_t>(starfield_.stars.size());
+
+        std::vector<glm::vec4> data(starInstanceCount_);
+        for (uint32_t i = 0; i < starInstanceCount_; ++i) {
+            const auto& s = starfield_.stars[i];
+            data[i] = glm::vec4(s.x, s.y, s.z, s.size * 0.5f);
+        }
+
+        vk::DeviceSize bufSize = sizeof(glm::vec4) * starInstanceCount_;
+        // simple: always recreate for now (small) - previous destroyed on assign below
+
+
+        vk::BufferCreateInfo bci{};
+        bci.size = bufSize;
+        bci.usage = vk::BufferUsageFlagBits::eStorageBuffer;
+        starInstanceBuf_ = ctx_.device().createBuffer(bci);
+
+        auto req = starInstanceBuf_.getMemoryRequirements();
+        uint32_t mt = pick_host_visible_mem_type(ctx_.physical_device(), req.memoryTypeBits);
+        if (mt == UINT32_MAX) mt = 0;
+        vk::MemoryAllocateInfo ai{req.size, mt};
+        starInstanceMem_ = ctx_.device().allocateMemory(ai);
+        starInstanceBuf_.bindMemory(*starInstanceMem_, 0);
+
+        void* map = starInstanceMem_.mapMemory(0, bufSize);
+        std::memcpy(map, data.data(), bufSize);
+        starInstanceMem_.unmapMemory();
+    }
+}
+
 void FrameRenderer::create_geometry_buffers() {
     // Starfield is now initialized in the ctor after demoTexture (see above)
 
-    // Pre-allocate a large enough sprite buffer for high-density starfield + particles.
-    // 900 stars * 3 quads (main + 2 trails) * 6 verts = ~16k + overhead for exhaust/bullets/enemies
+    // Pre-allocate a large enough sprite buffer for particles (stars now use separate 3D instanced mesh).
     constexpr std::uint32_t MAX_SPRITE_VERTS = 24000;
     sprite_vertex_count_ = MAX_SPRITE_VERTS;
 
@@ -307,6 +483,9 @@ void FrameRenderer::create_geometry_buffers() {
 
     // Initialize high-density rushing starfield
     starfield_.init();
+
+    // Load the 3D star model from glb (white sphere)
+    loadStarMesh();
 
     // Register demo texture at bindless index 1
     if (demoTexture_) {
@@ -434,8 +613,9 @@ void FrameRenderer::update_moving_stars(float dt) {
 
     std::vector<RetroVertex4D> sprite_verts;
 
-    // Stars (rushing perspective + trails)
-    starfield_.append_vertices(sprite_verts, ship_z_);
+    // Stars now rendered as 3D mesh instances (see record_scene_pass)
+    // starfield_.append_vertices(sprite_verts, ship_z_);  // disabled for 3D model
+    updateStarInstances();
 
     // === IMPROVED EXHAUST — tied to actual ship thrust + lateral velocity ===
     float thrust = std::max(0.0f, ship_vel_z_ * 0.9f + 0.35f);
@@ -508,7 +688,7 @@ void FrameRenderer::update_moving_stars(float dt) {
     if (sprite_verts.size() > sprite_vertex_count_) {
         std::cerr << "[ERROR] Sprite vertex overflow: generated " << sprite_verts.size()
                   << " verts but buffer holds only " << sprite_vertex_count_
-                  << ". Some particles will be dropped. Increase MAX_SPRITE_VERTS.\n";
+                  << ". Some particles will be dropped.\n";
         sprite_verts.resize(sprite_vertex_count_);
     }
 
@@ -632,6 +812,58 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
 
     // Update ship position (Space Invaders bottom style)
     update_ship_geometry(time);
+
+    // === 3D Star mesh using loaded StarPoint.glb (instanced via SSBO) ===
+    if (starMesh_.indexCount > 0 && starInstanceCount_ > 0 && pipelines_.scene().starBufferLayout()) {
+        pipelines_.bind_scene(cmd, RetroPipelineKind::StarMesh);
+
+        // Create / update star instance descriptor set (set=1)
+        static std::optional<vk::raii::DescriptorPool> starPool;
+        static std::optional<vk::raii::DescriptorSet> starSet;
+        if (!starSet) {
+            vk::DescriptorPoolSize ps{};
+            ps.type = vk::DescriptorType::eStorageBuffer;
+            ps.descriptorCount = 1;
+            vk::DescriptorPoolCreateInfo pci{};
+            pci.maxSets = 1;
+            pci.poolSizeCount = 1;
+            pci.pPoolSizes = &ps;
+            starPool = ctx_.device().createDescriptorPool(pci);
+
+            vk::DescriptorSetLayout starLayHandle = *(*pipelines_.scene().starBufferLayout());
+            std::vector<vk::DescriptorSetLayout> ls{starLayHandle};
+            vk::DescriptorSetAllocateInfo ai{};
+            ai.descriptorPool = *starPool;
+            ai.descriptorSetCount = 1;
+            ai.pSetLayouts = ls.data();
+            auto ss = ctx_.device().allocateDescriptorSets(ai);
+            if (!ss.empty()) starSet = std::move(ss[0]);
+        }
+
+        if (starSet) {
+            vk::DescriptorBufferInfo bi{*starInstanceBuf_, 0, VK_WHOLE_SIZE};
+            vk::WriteDescriptorSet w{};
+            w.dstSet = *starSet;
+            w.dstBinding = 0;
+            w.descriptorType = vk::DescriptorType::eStorageBuffer;
+            w.descriptorCount = 1;
+            w.pBufferInfo = &bi;
+            ctx_.device().updateDescriptorSets({w}, {});
+
+            auto& starPL = pipelines_.scene().layout(RetroPipelineKind::StarMesh);
+            auto& retroScene = pipelines_.scene();
+            if (auto* ds = retroScene.bindlessSet()) {
+                cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, starPL, 0, {**ds}, {});
+            }
+            // bind set 1
+            cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, starPL, 1, {*starSet}, {});
+
+            vk::DeviceSize vboff = 0;
+            cmd.bindVertexBuffers(0, *starMesh_.vertexBuf, vboff);
+            cmd.bindIndexBuffer(*starMesh_.indexBuf, 0, vk::IndexType::eUint32);
+            cmd.drawIndexed(starMesh_.indexCount, starInstanceCount_, 0, 0, 0);
+        }
+    }
 
     // Stars + exhaust (white + 4D radial flare/glow from particle shader; post-bloom will further enhance trail)
     pipelines_.bind_scene(cmd, RetroPipelineKind::ParticleAdditive);
