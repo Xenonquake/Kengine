@@ -32,6 +32,20 @@ public:
     void set_ship_velocity(float vx, float vy, float vz = 0.0f) { ship_vel_x_ = vx; ship_vel_y_ = vy; ship_vel_z_ = vz; }
     void set_ship_zw(float z, float w) { ship_z_ = z; ship_w_ = w; }
 
+    // Lightweight bullet data for renderer (populated from ECS)
+    struct BulletVisual {
+        float x, y, z, w;
+        float vx, vy, vz;
+        float size;
+        std::uint32_t color;
+    };
+
+    // Receive current live bullets from game logic (for rendering + trails)
+    void set_bullets(const std::vector<BulletVisual>& bullets) { bullets_ = bullets; }
+
+    // Update starfield flow from ship's velocity (call every frame after input/physics)
+    void update_background_flow(float ship_vx, float ship_vy, float ship_vz, float dt);
+
 private:
     void create_sync_objects();
     void create_command_buffers();
@@ -73,6 +87,7 @@ private:
     vk::raii::Buffer sprite_vertex_buffer_{nullptr};
     vk::raii::DeviceMemory sprite_vertex_memory_{nullptr};
     std::uint32_t sprite_vertex_count_ = 0;
+    std::uint32_t current_sprite_draw_count_ = 0; // actual number to draw this frame (stars + exhaust + bullets)
 
     vk::raii::Buffer ship_vertex_buffer_{nullptr};
     vk::raii::DeviceMemory ship_vertex_memory_{nullptr};
@@ -89,6 +104,11 @@ private:
     float ship_z_ = 1.6f;
     float ship_w_ = 0.05f;
 
+    // Ship-relative background flow for responsive starfield (Phase 1 polish)
+    float background_flow_x_ = 0.0f;
+    float background_flow_y_ = 0.0f;
+    float background_flow_z_ = 1.0f;
+
     struct MovingStar {
         float base_x, base_y;
         float depth; // negative = far, increases towards camera
@@ -99,6 +119,8 @@ private:
     std::vector<MovingStar> moving_stars_;
 
     std::optional<Texture> demoTexture_;  // for bindless demo on stars
+
+    std::vector<BulletVisual> bullets_;
 };
 
 } // namespace kengine

@@ -121,7 +121,7 @@ vk::raii::Pipeline RetroPipelineSet::create_pipeline(RetroPipelineKind kind) {
         break;
     case RetroPipelineKind::VectorGlow:
         desc = desc_sprite4d(formats_, shader_vector_vert_, shader_vector_frag_, BlendMode::Additive);
-        desc.topology = vk::PrimitiveTopology::eLineStrip;
+        desc.topology = vk::PrimitiveTopology::eLineList;  // for wireframe 3D ship model (pairs of lines)
         desc.depth_test = false;
         desc.depth_write = false;
         break;

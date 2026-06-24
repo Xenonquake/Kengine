@@ -230,35 +230,41 @@ void Engine::update(float dt) {
         }
     }
 
-    // Demo fire (space) - spawns fast kinematic projectiles
+    // === BULLET SPAWNING (Phase 1) ===
     fire_cooldown_ -= dt;
     if (win && glfwGetKey(win, GLFW_KEY_SPACE) == GLFW_PRESS && fire_cooldown_ <= 0.0f && player_entity_.valid()) {
         if (auto* ptc = world_->registry().get<TransformComponent>(player_entity_)) {
             if (auto* ppc = world_->registry().get<PhysicsComponent>(player_entity_)) {
                 auto proj = world_->registry().create();
                 auto& pt = world_->registry().emplace<TransformComponent>(proj);
+
+                // Spawn slightly "ahead" of the ship nose (visual forward is negative screen y in classic layout)
+                float nose_offset = 0.18f;
                 pt.position[0] = ptc->position[0];
-                pt.position[1] = ptc->position[1] + 0.12f;
+                pt.position[1] = ptc->position[1] - nose_offset;  // forward in screen
                 pt.position[2] = ptc->position[2];
                 pt.position[3] = ptc->position[3];
 
                 auto& pc = world_->registry().emplace<PhysicsComponent>(proj);
-                pc.mass = 0.08f;
+                pc.mass = 0.06f;
                 pc.kinematic = true;
 
                 ke_phys_body pb{};
                 pb.position = ke_vec4_make(pt.position[0], pt.position[1], pt.position[2], pt.position[3]);
-                float bs = 11.0f;
-                // inherit some player vel + strong forward bias in view
+
+                float bs = 13.5f;
+                // Inherit some player velocity + strong forward component
                 pb.velocity = ke_vec4_make(
-                    ppc->velocity[0] * 0.3f,
-                    (ppc->velocity[1] < 0.5f ? -bs : ppc->velocity[1] * 0.8f),
-                    ppc->velocity[2] * 0.4f + 1.5f,
-                    ppc->velocity[3] * 0.2f
+                    ppc->velocity[0] * 0.25f,
+                    (ppc->velocity[1] > 1.0f ? ppc->velocity[1] * 0.6f : -bs),
+                    ppc->velocity[2] * 0.3f + 2.2f,
+                    ppc->velocity[3] * 0.15f
                 );
                 pb.mass = pc.mass;
                 pc.body_index = world_->physics().create_body(pb);
-                fire_cooldown_ = 0.09f;
+
+                active_bullets_.push_back({proj, 1.15f});
+                fire_cooldown_ = 0.085f;
             }
         }
     }
@@ -332,28 +338,54 @@ void Engine::update(float dt) {
         if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
             ship_x_ = tc->position[0];
             ship_y_ = tc->position[1];
-            // (z/w of player could influence ship_z / ship_w in a future visual pass)
+            ship_z_ = tc->position[2];   // use actual physics position for 3D model
+            ship_w_ = tc->position[3];
         }
         if (auto* pc = world_->registry().get<PhysicsComponent>(player_entity_)) {
             ship_vel_x_ = pc->velocity[0];
             ship_vel_y_ = pc->velocity[1];
             ship_vel_z_ = pc->velocity[2];
         }
-        if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
-            ship_z_ = tc->position[2] + 1.6f;  // visual offset + player z
-            ship_w_ = tc->position[3];
-        }
+
+        // Feed ship velocity into the starfield so background reacts (Phase 1 feel)
+        frame_renderer_->update_background_flow(ship_vel_x_, ship_vel_y_, ship_vel_z_, dt);
     }
 
-    // Camera follow mode: track player body's position in the projected 3D space
+    // Locked 3rd person perspective: slightly behind and above the ship, looking forward
     if (player_entity_.valid()) {
         if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
-            float follow = 0.15f;
-            camera_.target[0] = (1.0f - follow) * camera_.target[0] + follow * tc->position[0];
-            camera_.target[1] = (1.0f - follow) * camera_.target[1] + follow * (tc->position[1] - 0.25f);
-            camera_.target[2] = (1.0f - follow) * camera_.target[2] + follow * tc->position[2];
-            // pull camera eye to follow from behind/side
-            camera_.eye[2] = (1.0f - follow * 0.6f) * camera_.eye[2] + (follow * 0.6f) * (tc->position[2] + 3.2f);
+            if (auto* ppc = world_->registry().get<PhysicsComponent>(player_entity_)) {
+                float px = tc->position[0];
+                float py = tc->position[1];
+                float pz = tc->position[2];
+
+                float vx = ppc->velocity[0];
+                float vy = ppc->velocity[1];
+                float vz = ppc->velocity[2];
+                float flen = sqrtf(vx*vx + vy*vy + vz*vz);
+                float fx = (flen > 0.01f) ? vx / flen : 0.0f;
+                float fy = (flen > 0.01f) ? vy / flen : -1.0f;
+                float fz = (flen > 0.01f) ? vz / flen : 0.0f;
+
+                // behind and above
+                float behind = 2.1f;
+                float above  = 0.85f;
+                float cam_x = px - fx * behind;
+                float cam_y = py - fy * behind + above;
+                float cam_z = pz - fz * behind;
+
+                camera_.eye[0] = cam_x;
+                camera_.eye[1] = cam_y;
+                camera_.eye[2] = cam_z;
+
+                // look slightly ahead of the ship
+                float lead = 0.7f;
+                camera_.target[0] = px + fx * lead;
+                camera_.target[1] = py + fy * lead - 0.15f;
+                camera_.target[2] = pz + fz * lead;
+
+                // keep manual w_slice / hyper control available via keys
+            }
         }
     }
 
@@ -435,6 +467,94 @@ void Engine::update(float dt) {
         if (b->position.w > 1.5f) { b->position.w = 1.5f; if (!pc.kinematic) b->velocity.w *= 0.4f; }
         if (b->position.w < -1.5f) { b->position.w = -1.5f; if (!pc.kinematic) b->velocity.w *= 0.4f; }
     });
+
+    // === Bullet lifetime + despawn + collect for renderer ===
+    std::vector<FrameRenderer::BulletVisual> live_bullet_vis;
+    for (auto it = active_bullets_.begin(); it != active_bullets_.end(); ) {
+        it->lifetime -= dt;
+
+        if (auto* btc = world_->registry().get<TransformComponent>(it->entity)) {
+            if (auto* bpc = world_->registry().get<PhysicsComponent>(it->entity)) {
+                if (auto* bb = world_->physics().get_body(bpc->body_index)) {
+                    // sync latest
+                    btc->position[0] = bb->position.x;
+                    btc->position[1] = bb->position.y;
+                    btc->position[2] = bb->position.z;
+                    btc->position[3] = bb->position.w;
+
+                    // collect visual (small fast neon)
+                    live_bullet_vis.push_back({
+                        btc->position[0], btc->position[1], btc->position[2], btc->position[3],
+                        bb->velocity.x, bb->velocity.y, bb->velocity.z,
+                        0.055f,
+                        0xFFAAFFEEu
+                    });
+
+                    // Kill bullets that fly too far (screen/enviro)
+                    if (std::abs(bb->position.x) > 3.8f ||
+                        std::abs(bb->position.y) > 3.5f ||
+                        std::abs(bb->position.z) > 3.0f) {
+                        it->lifetime = 0.0f;
+                    }
+                }
+            }
+        }
+
+        if (it->lifetime <= 0.0f) {
+            // simple despawn (entity will be GC'd on next registry cleanup if we add one; for now just drop)
+            it = active_bullets_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    frame_renderer_->set_bullets(live_bullet_vis);
+
+    // === Very basic collision (bullets vs drones) using spatial hash broadphase ===
+    for (auto& ab : active_bullets_) {
+        if (ab.lifetime <= 0.1f) continue; // dying
+
+        auto* btc = world_->registry().get<TransformComponent>(ab.entity);
+        if (!btc) continue;
+
+        int32_t cands[8];
+        int nc = world_->physics().query_radius(btc->position[0], btc->position[1], btc->position[2], 0.35f, cands, 8);
+
+        for (int ci = 0; ci < nc; ++ci) {
+            int bi = cands[ci];
+            // Skip player and the bullet itself
+            if (bi == player_body_index_) continue;
+
+            // Check if this body belongs to one of our drones
+            bool is_drone = false;
+            for (auto& de : drones_) {
+                if (auto* dpc = world_->registry().get<PhysicsComponent>(de)) {
+                    if (dpc->body_index == bi) {
+                        is_drone = true;
+                        break;
+                    }
+                }
+            }
+            if (is_drone) {
+                // Hit! Simple: kill the drone entity (remove from list) and the bullet
+                // For visual pop we just let lifetime kill the bullet
+                ab.lifetime = 0.01f;
+
+                // Remove the drone
+                for (auto dit = drones_.begin(); dit != drones_.end(); ++dit) {
+                    if (auto* dpc = world_->registry().get<PhysicsComponent>(*dit)) {
+                        if (dpc->body_index == bi) {
+                            // Destroy the drone entity (components will be cleaned on registry side if we add destroy)
+                            world_->registry().destroy(*dit);
+                            dit = drones_.erase(dit);
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
 
     world_->registry().view<RetroVisualComponent>([this](Entity /*e*/, RetroVisualComponent& r) {
         r.visual = retro_state_;

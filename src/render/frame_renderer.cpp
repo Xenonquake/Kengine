@@ -175,8 +175,8 @@ void FrameRenderer::create_geometry_buffers() {
         auto q = make_sprite_quad(s.base_x, s.base_y, z, 0.0f, s.size, s.size, s.color, 1, 0.f, 0.f, s.speed);
         initial_sprites.insert(initial_sprites.end(), q.begin(), q.end());
     }
-    // room for exhaust trail quads (5*6 = 30 verts)
-    initial_sprites.resize(initial_sprites.size() + 30);
+    // room for exhaust + bullets (generous for Phase 1)
+    initial_sprites.resize(initial_sprites.size() + 120);
 
     sprite_vertex_count_ = static_cast<std::uint32_t>(initial_sprites.size());
     vk::DeviceSize sprite_size = sizeof(RetroVertex4D) * initial_sprites.size();
@@ -185,21 +185,12 @@ void FrameRenderer::create_geometry_buffers() {
     sprite_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), sprite_vertex_buffer_);
     upload_host_buffer(sprite_vertex_memory_, initial_sprites.data(), sprite_size);
 
-    // --- Vector ship at bottom (Space Invaders style) ---
-    ship_base_shape_ = {
-        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0,0,0}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // nose top
-        {{-0.08f, -0.02f, 0.0f, 0.0f}, {0,0,0}, {0.0f, 1.0f}, 0xFFCCFFFFu},
-        {{-0.04f, -0.06f, 0.0f, 0.0f}, {0,0,0}, {0.25f, 0.6f}, 0xFFAAEEFFu},
-        {{ 0.04f, -0.06f, 0.0f, 0.0f}, {0,0,0}, {0.75f, 0.6f}, 0xFFAAEEFFu},
-        {{ 0.08f, -0.02f, 0.0f, 0.0f}, {0,0,0}, {1.0f, 1.0f}, 0xFFCCFFFFu},
-        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0,0,0}, {0.5f, 0.0f}, 0xFFFFFFFFu},
-    };
-    ship_vertex_count_ = static_cast<std::uint32_t>(ship_base_shape_.size());
-
-    vk::DeviceSize ship_size = sizeof(RetroVertex4D) * ship_base_shape_.size();
+    // 3D edgy green neon angular retro spaceship is built procedurally in update_ship_geometry
+    // (wireframe lines using eLineList topology for angular look)
+    ship_vertex_count_ = 64;
+    vk::DeviceSize ship_size = sizeof(RetroVertex4D) * ship_vertex_count_;
     ship_vertex_buffer_ = create_vb(ctx_.device(), ship_size);
     ship_vertex_memory_ = alloc_and_bind_host(ctx_.device(), ctx_.physical_device(), ship_vertex_buffer_);
-    upload_host_buffer(ship_vertex_memory_, ship_base_shape_.data(), ship_size);
 
     // Demo texture for bindless (small white 2x2 to test sampling on stars)
     {
@@ -218,72 +209,152 @@ void FrameRenderer::create_geometry_buffers() {
     }
 }
 
-static RetroVertex4D transform_ship_vert(const RetroVertex4D& base, float cx, float cy, float cz, float cw,
-                                         float vx, float vy, float vz,
-                                         float yaw, float pitch_w) {
-    // very simple 2D-ish yaw in xy + slight w modulation
-    float c = cosf(yaw), s = sinf(yaw);
-    float x = base.pos[0] * c - base.pos[1] * s;
-    float y = base.pos[0] * s + base.pos[1] * c;
-    float z = base.pos[2] + (base.pos[1] * 0.15f) * sinf(pitch_w);
-    float w = base.pos[3] + cw + cosf(pitch_w) * 0.03f;
-    RetroVertex4D v = base;
-    v.pos[0] = x + cx;
-    v.pos[1] = y + cy;
-    v.pos[2] = z + cz;
-    v.pos[3] = w;
-    v.vel[0] = vx;
-    v.vel[1] = vy;
-    v.vel[2] = vz;
-    return v;
+void FrameRenderer::update_background_flow(float ship_vx, float ship_vy, float ship_vz, float dt) {
+    float responsiveness = 0.65f;
+    background_flow_x_ = background_flow_x_ * (1.0f - responsiveness) + (-ship_vx * 0.85f) * responsiveness;
+    background_flow_y_ = background_flow_y_ * (1.0f - responsiveness) + (-ship_vy * 0.65f) * responsiveness;
+    background_flow_z_ = 1.0f + ship_vz * 0.45f;
 }
 
 void FrameRenderer::update_ship_geometry(float time) {
-    if (ship_base_shape_.empty() || ship_vertex_count_ == 0) return;
+    // Build edgy 3D green neon angular forward-pointed retro spaceship (wireframe)
+    std::vector<RetroVertex4D> live;
 
-    // Ship now driven by player physics (x/y + full 4D morph via shader + vel for effects)
-    float yaw = 0.0f;  // always pointing up
+    float vx = ship_vel_x_, vy = ship_vel_y_, vz = ship_vel_z_;
+    float flen = sqrtf(vx*vx + vy*vy + vz*vz);
+    float fx = (flen > 0.01f) ? vx / flen : 0.0f;
+    float fy = (flen > 0.01f) ? vy / flen : -1.0f;
+    float fz = (flen > 0.01f) ? vz / flen : 0.0f;
 
-    std::vector<RetroVertex4D> live(ship_base_shape_.size());
-    for (size_t i = 0; i < live.size(); ++i) {
-        live[i] = transform_ship_vert(ship_base_shape_[i], ship_x_, ship_y_, ship_z_, ship_w_,
-                                      ship_vel_x_, ship_vel_y_, ship_vel_z_, yaw, 0.0f);
-    }
+    // orthonormal basis (local +z = forward)
+    float rx = fy * 0.0f - fz * 1.0f;
+    float ry = fz * 0.0f - fx * 0.0f;
+    float rz = fx * 1.0f - fy * 0.0f;
+    float rlen = sqrtf(rx*rx + ry*ry + rz*rz);
+    if (rlen > 0.001f) { rx /= rlen; ry /= rlen; rz /= rlen; } else { rx=1.0f; ry=0; rz=0; }
 
+    float ux = ry * fz - rz * fy;
+    float uy = rz * fx - rx * fz;
+    float uz = rx * fy - ry * fx;
+
+    float model_scale = 2.0f;  // make the 3D ship larger and more visible
+
+    auto add_line = [&](float lx1, float ly1, float lz1, float lx2, float ly2, float lz2, uint32_t col) {
+        lx1 *= model_scale; ly1 *= model_scale; lz1 *= model_scale;
+        lx2 *= model_scale; ly2 *= model_scale; lz2 *= model_scale;
+        float wx1 = lx1*rx + ly1*ux + lz1*fx + ship_x_;
+        float wy1 = lx1*ry + ly1*uy + lz1*fy + ship_y_;
+        float wz1 = lx1*rz + ly1*uz + lz1*fz + ship_z_;
+        float ww1 = ship_w_;
+
+        float wx2 = lx2*rx + ly2*ux + lz2*fx + ship_x_;
+        float wy2 = lx2*ry + ly2*uy + lz2*fy + ship_y_;
+        float wz2 = lx2*rz + ly2*uz + lz2*fz + ship_z_;
+        float ww2 = ship_w_;
+
+        live.push_back({{wx1, wy1, wz1, ww1}, {vx, vy, vz}, {0.0f, 0.0f}, col, 0});
+        live.push_back({{wx2, wy2, wz2, ww2}, {vx, vy, vz}, {0.0f, 1.0f}, col, 0});
+    };
+
+    const uint32_t neon_green = 0xFF00FF88;
+    const uint32_t dark_green = 0xFF008844;
+    const uint32_t accent    = 0xFF44FFAA;
+
+    // Angular forward pointed retro 3D ship (green neon wireframe)
+    // local: +z forward, +y up, +x right
+    // Nose
+    add_line( 0.000f,  0.025f,  0.26f,   -0.070f,  0.010f,  0.12f , neon_green);
+    add_line( 0.000f,  0.025f,  0.26f,    0.070f,  0.010f,  0.12f , neon_green);
+    // Left wing
+    add_line(-0.070f,  0.010f,  0.12f ,  -0.220f,  0.000f,  0.03f , neon_green);
+    add_line(-0.220f,  0.000f,  0.03f ,  -0.090f,  0.015f, -0.09f , dark_green);
+    // Right wing
+    add_line( 0.070f,  0.010f,  0.12f ,   0.220f,  0.000f,  0.03f , neon_green);
+    add_line( 0.220f,  0.000f,  0.03f ,   0.090f,  0.015f, -0.09f , dark_green);
+    // Fuselage spine
+    add_line( 0.000f,  0.025f,  0.26f ,   0.000f,  0.040f, -0.05f , accent);
+    add_line( 0.000f,  0.040f, -0.05f ,   0.000f,  0.030f, -0.18f , neon_green);
+    // Cockpit / angular top
+    add_line(-0.030f,  0.035f,  0.10f ,   0.030f,  0.035f,  0.10f , dark_green);
+    add_line(-0.030f,  0.035f,  0.10f ,   0.000f,  0.055f,  0.02f , accent);
+    add_line( 0.030f,  0.035f,  0.10f ,   0.000f,  0.055f,  0.02f , accent);
+    // Vertical stabilizer (edgy fin)
+    add_line( 0.000f,  0.030f, -0.05f ,   0.000f,  0.130f, -0.10f , neon_green);
+    add_line( 0.000f,  0.130f, -0.10f ,   0.000f,  0.045f, -0.20f , dark_green);
+    // Lower body details for 3D volume
+    add_line(-0.040f,  0.005f,  0.08f ,   0.040f,  0.005f,  0.08f , dark_green);
+    add_line(-0.040f,  0.005f,  0.08f ,  -0.060f, -0.010f, -0.06f , neon_green);
+    add_line( 0.040f,  0.005f,  0.08f ,   0.060f, -0.010f, -0.06f , neon_green);
+
+    ship_vertex_count_ = static_cast<std::uint32_t>(live.size());
     vk::DeviceSize sz = sizeof(RetroVertex4D) * live.size();
     upload_host_buffer(ship_vertex_memory_, live.data(), sz);
-    ship_vertex_count_ = static_cast<std::uint32_t>(live.size());
 }
 
 void FrameRenderer::update_moving_stars(float dt) {
     if (moving_stars_.empty()) return;
 
+    // Flow members are updated from engine via update_background_flow (ship-relative)
+
     std::vector<RetroVertex4D> sprite_verts;
 
     for (auto& s : moving_stars_) {
-        s.depth += s.speed * dt;
+        // Apply ship-relative flow + depth (parallax)
+        float effective_speed = s.speed * background_flow_z_;
+        s.depth += effective_speed * dt;
+
+        // Lateral streaming (stronger parallax on closer stars)
+        s.base_x += background_flow_x_ * dt * (1.6f + (s.depth * 0.35f));
+        s.base_y += background_flow_y_ * dt * (1.3f + (s.depth * 0.25f));
+
         if (s.depth > 1.8f) {
             // respawn far away, random lateral position
             s.depth = -2.8f - (rand() % 5) * 0.15f;
             s.base_x = ((rand() % 2000) / 1000.0f - 1.0f) * 0.95f;
             s.base_y = ((rand() % 2000) / 1000.0f - 1.0f) * 0.7f;
+
+            // Inherit a bit of current flow for continuity
+            s.base_x += background_flow_x_ * 0.35f;
+            s.base_y += background_flow_y_ * 0.35f;
         }
+
         float sz = s.size * (1.0f + (s.depth + 2.8f) * 0.4f); // grow as it approaches
-        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color, 1, 0.f, 0.f, s.speed);
+
+        // Pass full velocity (for shader glow trails / motion blur)
+        float vx = background_flow_x_ * 0.75f;
+        float vy = background_flow_y_ * 0.75f;
+        float vz = effective_speed;
+
+        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color, 1, vx, vy, vz);
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
-    // Add simple exhaust trail behind ship (white + flare; combines with 4D particle effect + post bloom)
+    // === IMPROVED EXHAUST — tied to actual ship thrust + lateral velocity ===
+    float thrust = std::max(0.0f, ship_vel_z_ * 0.9f + 0.35f);
     float exhaust_y = ship_y_ - 0.18f;
     for (int e = 0; e < 5; ++e) {
-        float ex = ship_x_ + (e - 2) * 0.015f * (1.0f + e * 0.2f);
+        float ex = ship_x_ + (e - 2) * 0.015f * (1.0f + e * 0.2f) + background_flow_x_ * 0.025f;
         float ey = exhaust_y - e * 0.035f;
-        float ez = 1.55f - e * 0.02f;
-        float es = 0.022f - e * 0.002f;
+        float ez = ship_z_ - e * 0.02f;
+        float es = (0.022f - e * 0.002f) * (0.65f + thrust * 0.9f);
         if (es < 0.005f) es = 0.005f;
+
         std::uint32_t ecol = (e < 2) ? 0xFFFFFFFFu : 0xFFEEFFFFu;
-        // exhaust has velocity from ship
-        auto q = make_sprite_quad(ex, ey, ez, 0.0f, es, es * 0.7f, ecol, 1, 0.f, -0.8f, 0.f);
+
+        // Exhaust velocity reacts to ship's lateral + forward thrust
+        float evx = background_flow_x_ * 0.45f;
+        float evy = -0.9f + background_flow_y_ * 0.35f;
+        float evz = -thrust * 0.7f;
+
+        auto q = make_sprite_quad(ex, ey, ez, 0.0f, es, es * 0.7f, ecol, 1, evx, evy, evz);
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+
+    // === BULLETS (small fast glowing quads with velocity for shader trails) ===
+    for (const auto& b : bullets_) {
+        float bs = b.size * 0.9f;
+        auto q = make_sprite_quad(b.x, b.y, b.z, b.w, bs, bs * 0.35f, b.color, 1,
+                                  b.vx, b.vy, b.vz);
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
@@ -292,6 +363,8 @@ void FrameRenderer::update_moving_stars(float dt) {
         sprite_verts.push_back({{0,0,0,0}, {0,0,0}, {0,0}, 0, 0});
     }
     if (sprite_verts.size() > sprite_vertex_count_) sprite_verts.resize(sprite_vertex_count_);
+
+    current_sprite_draw_count_ = static_cast<std::uint32_t>(sprite_verts.size());
 
     vk::DeviceSize sz = sizeof(RetroVertex4D) * sprite_verts.size();
     upload_host_buffer(sprite_vertex_memory_, sprite_verts.data(), sz);
@@ -354,7 +427,7 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
 
     vk::DeviceSize off = 0;
     cmd.bindVertexBuffers(0, *sprite_vertex_buffer_, off);
-    cmd.draw(sprite_vertex_count_, 1, 0, 0);
+    cmd.draw(current_sprite_draw_count_ > 0 ? current_sprite_draw_count_ : sprite_vertex_count_, 1, 0, 0);
 
     // Vector line ship (no rocks)
     pipelines_.bind_scene(cmd, RetroPipelineKind::VectorGlow);

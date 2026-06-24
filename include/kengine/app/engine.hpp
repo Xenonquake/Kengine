@@ -89,6 +89,13 @@ private:
 
     // Fire rate limiter for demo projectiles
     float fire_cooldown_ = 0.0f;
+
+    // Active bullets (Phase 1)
+    struct ActiveBullet {
+        Entity entity;
+        float lifetime = 1.1f;
+    };
+    std::vector<ActiveBullet> active_bullets_;
 };
 
 } // namespace kengine
