@@ -95,4 +95,66 @@ void Camera4D::reset() {
     hyper_rot[3] = 0.10f;
 }
 
+void Camera4D::chase_ship(const float ship_pos[3], const float ship_forward[3], float dt) {
+    // Compute 3D chase: eye slightly behind and above ship in its local space.
+    // This makes the camera manipulate relative to the ship in 3D environment,
+    // rather than rotating the entire world view.
+    float fwd[3] = {ship_forward[0], ship_forward[1], ship_forward[2]};
+    float flen = sqrtf(fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]);
+    if (flen > 0.001f) {
+        fwd[0] /= flen; fwd[1] /= flen; fwd[2] /= flen;
+    } else {
+        fwd[0] = 0; fwd[1] = -1; fwd[2] = 0;  // default forward
+    }
+
+    // Right and up basis (no roll for simplicity, use world up cross)
+    float up_world[3] = {0, 1, 0};
+    float right[3] = {
+        fwd[1]*up_world[2] - fwd[2]*up_world[1],
+        fwd[2]*up_world[0] - fwd[0]*up_world[2],
+        fwd[0]*up_world[1] - fwd[1]*up_world[0]
+    };
+    float rlen = sqrtf(right[0]*right[0] + right[1]*right[1] + right[2]*right[2]);
+    if (rlen > 0.001f) {
+        right[0]/=rlen; right[1]/=rlen; right[2]/=rlen;
+    } else {
+        right[0] = 1; right[1] = 0; right[2] = 0;
+    }
+
+    float ship_up[3] = {
+        right[1]*fwd[2] - right[2]*fwd[1],
+        right[2]*fwd[0] - right[0]*fwd[2],
+        right[0]*fwd[1] - right[1]*fwd[0]
+    };
+
+    // Desired offset: behind along -fwd, above along ship_up
+    const float dist = 2.2f;
+    const float height = 0.9f;
+    float desired_eye[3] = {
+        ship_pos[0] - fwd[0] * dist + ship_up[0] * height,
+        ship_pos[1] - fwd[1] * dist + ship_up[1] * height,
+        ship_pos[2] - fwd[2] * dist + ship_up[2] * height
+    };
+
+    // Target: ahead of ship
+    const float lead = 0.8f;
+    float desired_target[3] = {
+        ship_pos[0] + fwd[0] * lead,
+        ship_pos[1] + fwd[1] * lead,
+        ship_pos[2] + fwd[2] * lead
+    };
+
+    // Smooth lerp for cinematic feel (use dt for frame rate independence)
+    const float smooth = 8.0f * dt;  // higher = snappier
+    for (int i=0; i<3; i++) {
+        eye[i] = eye[i] + (desired_eye[i] - eye[i]) * smooth;
+        target[i] = target[i] + (desired_target[i] - target[i]) * smooth;
+    }
+
+    // Keep up as world up for no roll
+    up[0] = 0; up[1] = 1; up[2] = 0;
+
+    // 4D params (w_slice, hyper_rot) left for background/4D effects only; main gameplay is 3D ship-relative.
+}
+
 } // namespace kengine

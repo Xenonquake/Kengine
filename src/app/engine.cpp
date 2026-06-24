@@ -1,5 +1,6 @@
 #include "kengine/app/engine.hpp"
 #include "kengine/core/service_locator.hpp"
+#include "kengine/game/game_entity.hpp"
 #include "kengine/render/camera_4d.hpp"
 #include <GLFW/glfw3.h>
 #include <cmath>
@@ -178,15 +179,9 @@ void Engine::update(float dt) {
 
     GLFWwindow* win = vulkan_ ? vulkan_->window() : nullptr;
 
-    // One-time starting camera for the ship/arena view. User can fly camera with IJKL+U/O.
+    // Defaults for 4D params (w_slice, hyper_rot). Eye/target now driven by chase_ship for 3D Star Fox feel.
     static bool camera_set = false;
     if (!camera_set) {
-        camera_.eye[0]   = 0.0f;
-        camera_.eye[1]   = 0.15f;
-        camera_.eye[2]   = 3.2f;
-        camera_.target[0]= 0.0f;
-        camera_.target[1]= -0.3f;
-        camera_.target[2]= 0.0f;
         camera_.w_slice  = 0.0f;
         std::fill(std::begin(camera_.hyper_rot), std::end(camera_.hyper_rot), 0.0f);
         camera_set = true;
@@ -265,6 +260,17 @@ void Engine::update(float dt) {
 
                 active_bullets_.push_back({proj, 1.15f});
                 fire_cooldown_ = 0.085f;
+
+                // Populate GameEntity prototype for bullets
+                GameEntity bg = {};
+                bg.pos = ke_vec4_make(pt.position[0], pt.position[1], pt.position[2], pt.position[3]);
+                bg.vel = pb.velocity;
+                bg.type = 2;
+                bg.active = true;
+                bg.lifetime = 1.15f;
+                bg.scale = 0.5f;
+                bg.color = 0xFFAAFFEEu;
+                frame_renderer_->add_bullet(bg);
             }
         }
     }
@@ -351,40 +357,24 @@ void Engine::update(float dt) {
         frame_renderer_->update_background_flow(ship_vel_x_, ship_vel_y_, ship_vel_z_, dt);
     }
 
-    // Locked 3rd person perspective: slightly behind and above the ship, looking forward
+    // Locked 3rd person perspective: Star Fox style 3D chase cam.
+    // Camera manipulates relative to the ship in 3D env (no world rotation via cam).
+    // 4D effects (slice/hyper) are for visual flair on background/special elements.
     if (player_entity_.valid()) {
         if (auto* tc = world_->registry().get<TransformComponent>(player_entity_)) {
             if (auto* ppc = world_->registry().get<PhysicsComponent>(player_entity_)) {
-                float px = tc->position[0];
-                float py = tc->position[1];
-                float pz = tc->position[2];
-
+                float ship_pos[3] = {tc->position[0], tc->position[1], tc->position[2]};
                 float vx = ppc->velocity[0];
                 float vy = ppc->velocity[1];
                 float vz = ppc->velocity[2];
                 float flen = sqrtf(vx*vx + vy*vy + vz*vz);
-                float fx = (flen > 0.01f) ? vx / flen : 0.0f;
-                float fy = (flen > 0.01f) ? vy / flen : -1.0f;
-                float fz = (flen > 0.01f) ? vz / flen : 0.0f;
-
-                // behind and above
-                float behind = 2.1f;
-                float above  = 0.85f;
-                float cam_x = px - fx * behind;
-                float cam_y = py - fy * behind + above;
-                float cam_z = pz - fz * behind;
-
-                camera_.eye[0] = cam_x;
-                camera_.eye[1] = cam_y;
-                camera_.eye[2] = cam_z;
-
-                // look slightly ahead of the ship
-                float lead = 0.7f;
-                camera_.target[0] = px + fx * lead;
-                camera_.target[1] = py + fy * lead - 0.15f;
-                camera_.target[2] = pz + fz * lead;
-
-                // keep manual w_slice / hyper control available via keys
+                float ship_fwd[3] = {0, -1, 0};  // default
+                if (flen > 0.01f) {
+                    ship_fwd[0] = vx / flen;
+                    ship_fwd[1] = vy / flen;
+                    ship_fwd[2] = vz / flen;
+                }
+                camera_.chase_ship(ship_pos, ship_fwd, dt);
             }
         }
     }
@@ -509,6 +499,22 @@ void Engine::update(float dt) {
     }
 
     frame_renderer_->set_bullets(live_bullet_vis);
+
+    // === Collect enemies for rendering (Galaga formations prototype) ===
+    std::vector<FrameRenderer::EnemyVisual> enemy_vis;
+    for (auto& de : drones_) {
+        if (auto* dtc = world_->registry().get<TransformComponent>(de)) {
+            enemy_vis.push_back({
+                dtc->position[0], dtc->position[1], dtc->position[2], dtc->position[3],
+                0.0f, // yaw for future
+                1.0f,
+                0xFF88FF88u // green enemies
+            });
+        }
+    }
+    frame_renderer_->set_enemies(enemy_vis);
+
+    // (enemies_game managed in renderer prototype for independent movement demo; ECS drones for other systems)
 
     // === Very basic collision (bullets vs drones) using spatial hash broadphase ===
     for (auto& ab : active_bullets_) {

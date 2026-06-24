@@ -1,6 +1,7 @@
 #include "kengine/render/frame_renderer.hpp"
 #include "kengine/render/texture.hpp"
 #include "kengine/vulkan/dynamic_renderer.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -207,6 +208,8 @@ void FrameRenderer::create_geometry_buffers() {
         auto& rs = pipelines_.scene();
         rs.updateTexture(1, demoTexture_->view(), demoTexture_->sampler());
     }
+
+    init_game_entities();
 }
 
 void FrameRenderer::update_background_flow(float ship_vx, float ship_vy, float ship_vz, float dt) {
@@ -245,12 +248,12 @@ void FrameRenderer::update_ship_geometry(float time) {
         float wx1 = lx1*rx + ly1*ux + lz1*fx + ship_x_;
         float wy1 = lx1*ry + ly1*uy + lz1*fy + ship_y_;
         float wz1 = lx1*rz + ly1*uz + lz1*fz + ship_z_;
-        float ww1 = ship_w_;
+        float ww1 = 0.0f;  // pure 3D for ship, no 4D warp on the model itself
 
         float wx2 = lx2*rx + ly2*ux + lz2*fx + ship_x_;
         float wy2 = lx2*ry + ly2*uy + lz2*fy + ship_y_;
         float wz2 = lx2*rz + ly2*uz + lz2*fz + ship_z_;
-        float ww2 = ship_w_;
+        float ww2 = 0.0f;  // pure 3D for ship
 
         live.push_back({{wx1, wy1, wz1, ww1}, {vx, vy, vz}, {0.0f, 0.0f}, col, 0});
         live.push_back({{wx2, wy2, wz2, ww2}, {vx, vy, vz}, {0.0f, 1.0f}, col, 0});
@@ -260,31 +263,35 @@ void FrameRenderer::update_ship_geometry(float time) {
     const uint32_t dark_green = 0xFF008844;
     const uint32_t accent    = 0xFF44FFAA;
 
-    // Angular forward pointed retro 3D ship (green neon wireframe)
-    // local: +z forward, +y up, +x right
-    // Nose
-    add_line( 0.000f,  0.025f,  0.26f,   -0.070f,  0.010f,  0.12f , neon_green);
-    add_line( 0.000f,  0.025f,  0.26f,    0.070f,  0.010f,  0.12f , neon_green);
-    // Left wing
-    add_line(-0.070f,  0.010f,  0.12f ,  -0.220f,  0.000f,  0.03f , neon_green);
-    add_line(-0.220f,  0.000f,  0.03f ,  -0.090f,  0.015f, -0.09f , dark_green);
-    // Right wing
-    add_line( 0.070f,  0.010f,  0.12f ,   0.220f,  0.000f,  0.03f , neon_green);
-    add_line( 0.220f,  0.000f,  0.03f ,   0.090f,  0.015f, -0.09f , dark_green);
-    // Fuselage spine
-    add_line( 0.000f,  0.025f,  0.26f ,   0.000f,  0.040f, -0.05f , accent);
-    add_line( 0.000f,  0.040f, -0.05f ,   0.000f,  0.030f, -0.18f , neon_green);
-    // Cockpit / angular top
-    add_line(-0.030f,  0.035f,  0.10f ,   0.030f,  0.035f,  0.10f , dark_green);
-    add_line(-0.030f,  0.035f,  0.10f ,   0.000f,  0.055f,  0.02f , accent);
-    add_line( 0.030f,  0.035f,  0.10f ,   0.000f,  0.055f,  0.02f , accent);
-    // Vertical stabilizer (edgy fin)
-    add_line( 0.000f,  0.030f, -0.05f ,   0.000f,  0.130f, -0.10f , neon_green);
-    add_line( 0.000f,  0.130f, -0.10f ,   0.000f,  0.045f, -0.20f , dark_green);
-    // Lower body details for 3D volume
-    add_line(-0.040f,  0.005f,  0.08f ,   0.040f,  0.005f,  0.08f , dark_green);
-    add_line(-0.040f,  0.005f,  0.08f ,  -0.060f, -0.010f, -0.06f , neon_green);
-    add_line( 0.040f,  0.005f,  0.08f ,   0.060f, -0.010f, -0.06f , neon_green);
+    // Triangular 3D retro ship (green neon wireframe) - upgraded from flat to full 3D
+    // Local coords: +z = forward (nose), +y = up, +x = right
+    // Main body forms a 3D triangle (pointed nose, wide back with height for volume)
+    // Nose (pointed front)
+    add_line( 0.000f,  0.000f,  0.28f,  -0.100f,  0.060f,  0.05f , neon_green);
+    add_line( 0.000f,  0.000f,  0.28f,   0.100f,  0.060f,  0.05f , neon_green);
+    // Top back edge (wide triangle top)
+    add_line(-0.100f,  0.060f,  0.05f,   0.100f,  0.060f,  0.05f , neon_green);
+    // Bottom back edge (for 3D triangular volume)
+    add_line(-0.080f, -0.050f,  0.00f,   0.080f, -0.050f,  0.00f , dark_green);
+    // Nose to bottom
+    add_line( 0.000f,  0.000f,  0.28f,   0.000f, -0.020f,  0.18f , accent);
+    // Side edges for 3D triangle
+    add_line(-0.100f,  0.060f,  0.05f,  -0.080f, -0.050f,  0.00f , neon_green);
+    add_line( 0.100f,  0.060f,  0.05f,   0.080f, -0.050f,  0.00f , neon_green);
+    // Wings - triangular extensions
+    add_line(-0.100f,  0.060f,  0.05f,  -0.220f,  0.020f, -0.02f , neon_green);
+    add_line( 0.100f,  0.060f,  0.05f,   0.220f,  0.020f, -0.02f , neon_green);
+    add_line(-0.220f,  0.020f, -0.02f,  -0.120f,  0.000f, -0.10f , dark_green);
+    add_line( 0.220f,  0.020f, -0.02f,   0.120f,  0.000f, -0.10f , dark_green);
+    // Vertical fin (triangular tail for 3D look)
+    add_line( 0.000f,  0.060f,  0.02f,   0.000f,  0.140f, -0.08f , neon_green);
+    add_line( 0.000f,  0.140f, -0.08f,   0.000f,  0.030f, -0.15f , dark_green);
+    add_line( 0.000f,  0.030f, -0.08f,   0.000f,  0.030f, -0.15f , accent);
+    // Cross connections for solid triangular 3D appearance
+    add_line(-0.080f, -0.050f,  0.00f,   0.000f,  0.000f, -0.10f , dark_green);
+    add_line( 0.080f, -0.050f,  0.00f,   0.000f,  0.000f, -0.10f , dark_green);
+    add_line(-0.100f,  0.060f,  0.05f,   0.000f,  0.000f,  0.28f , accent);  // reinforce nose to back
+    add_line( 0.100f,  0.060f,  0.05f,   0.000f,  0.000f,  0.28f , accent);
 
     ship_vertex_count_ = static_cast<std::uint32_t>(live.size());
     vk::DeviceSize sz = sizeof(RetroVertex4D) * live.size();
@@ -358,6 +365,29 @@ void FrameRenderer::update_moving_stars(float dt) {
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
+    // === ENEMIES (Galaga-style geometric quads, prototype) ===
+    for (const auto& e : enemies_) {
+        float s = 0.08f * e.scale;
+        // simple diamond for enemy using quad
+        uint32_t ecol = e.color ? e.color : 0xFF88FF88u;
+        auto q = make_sprite_quad(e.x, e.y, e.z, 0.0f, s, s * 0.6f, ecol, 1, 0.f, 0.f, 0.f);  // 3D objects, w=0 to avoid 4D warp on gameplay elements
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+
+    // === Prototype GameEntity enemies and bullets (for demo movement) ===
+    for (const auto& e : enemies_game) {
+        if (!e.active) continue;
+        float s = 0.06f * e.scale;
+        auto q = make_sprite_quad(e.pos.x, e.pos.y, e.pos.z, 0.0f, s, s*0.7f, e.color, 1, e.vel.x*0.1f, e.vel.y*0.1f, e.vel.z*0.1f);  // 3D, w=0
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+    for (const auto& b : bullets_game) {
+        if (!b.active) continue;
+        float bs = 0.04f;
+        auto q = make_sprite_quad(b.pos.x, b.pos.y, b.pos.z, 0.0f, bs, bs*0.4f, b.color, 1, b.vel.x, b.vel.y, b.vel.z);  // 3D gameplay bullets
+        sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
+    }
+
     // pad if needed
     while (sprite_verts.size() < sprite_vertex_count_) {
         sprite_verts.push_back({{0,0,0,0}, {0,0,0}, {0,0}, 0, 0});
@@ -368,6 +398,61 @@ void FrameRenderer::update_moving_stars(float dt) {
 
     vk::DeviceSize sz = sizeof(RetroVertex4D) * sprite_verts.size();
     upload_host_buffer(sprite_vertex_memory_, sprite_verts.data(), sz);
+}
+
+void FrameRenderer::init_game_entities() {
+    // Player
+    player = {};
+    player.pos = ke_vec4_make(0.0f, -0.55f, 0.0f, 0.05f);
+    player.vel = ke_vec4_make(0.0f, 0.0f, 0.0f, 0.0f);
+    player.type = 0;
+    player.color = 0xFFFFFFFFu;
+    player.scale = 1.0f;
+
+    // 4-6 simple enemies with basic movement (Galaga-like: spread, moving toward player area)
+    enemies_game.clear();
+    for (int i = 0; i < 5; ++i) {
+        GameEntity e = {};
+        e.pos = ke_vec4_make(-1.5f + i * 0.75f, 1.0f + (i % 2) * 0.5f, -0.5f + (i - 2) * 0.3f, 0.0f);
+        e.vel = ke_vec4_make(0.0f, -1.5f + (i % 3) * 0.3f, 0.2f, 0.0f);  // basic forward/down movement
+        e.type = 1;
+        e.active = true;
+        e.scale = 0.8f + (i % 2) * 0.1f;
+        e.color = 0xFF88FF88u;  // green enemies
+        e.lifetime = -1.0f;
+        enemies_game.push_back(e);
+    }
+
+    bullets_game.clear();
+}
+
+void FrameRenderer::update_game_entities(float dt) {
+    // Sync player from current ship state (for prototype)
+    player.pos = ke_vec4_make(ship_x_, ship_y_, ship_z_, ship_w_);
+    player.vel = ke_vec4_make(ship_vel_x_, ship_vel_y_, ship_vel_z_, 0.0f);
+
+    // Update bullets (enemies driven by main ECS)
+    for (auto& b : bullets_game) {
+        if (!b.active) continue;
+        b.pos.x += b.vel.x * dt;
+        b.pos.y += b.vel.y * dt;
+        b.pos.z += b.vel.z * dt;
+        b.pos.w += b.vel.w * dt;
+        if (b.lifetime > 0) b.lifetime -= dt;
+        if (b.lifetime <= 0 || fabs(b.pos.y) > 3.5f || fabs(b.pos.x) > 4.0f) {
+            b.active = false;
+        }
+    }
+
+    // Clean inactive bullets occasionally
+    bullets_game.erase(std::remove_if(bullets_game.begin(), bullets_game.end(), [](const GameEntity& b){ return !b.active; }), bullets_game.end());
+}
+
+void FrameRenderer::render_game_entities() {
+    // Append enemies and bullets to current sprite_verts for rendering (simple quads)
+    // Note: this is called inside update_moving_stars after building sprites, but we can append here if needed.
+    // For simplicity, since called after, but to integrate, we append in the sprite build if possible.
+    // (Implementation assumes called at right time; for full, integrate into sprite_verts build)
 }
 
 void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
@@ -408,6 +493,10 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     float dt = time - last_t;
     if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
     last_t = time;
+
+    // Update game entities prototype first (movement)
+    update_game_entities(dt);
+
     update_moving_stars(dt);
 
     // Update ship position (Space Invaders bottom style)
@@ -434,6 +523,9 @@ void FrameRenderer::record_scene_pass(std::uint32_t sync_index, float time,
     pipelines_.push_scene_state(cmd, RetroPipelineKind::VectorGlow, pc);
     cmd.bindVertexBuffers(0, *ship_vertex_buffer_, off);
     cmd.draw(ship_vertex_count_, 1, 0, 0);
+
+    // Render game entities (enemies, bullets) as additional sprites for prototype
+    render_game_entities();
 
     DynamicRenderer::end(cmd);
 

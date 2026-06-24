@@ -44,6 +44,10 @@ struct Camera4D {
     void adjust_slice(float delta);
     void adjust_hyper(int index, float delta);    // index 0..3
     void reset();
+
+    // 3D Star Fox style chase camera: positions eye behind/above ship, target ahead.
+    // ship_pos/forward are in the projected 3D space. Call every frame.
+    void chase_ship(const float ship_pos[3], const float ship_forward[3], float dt);
 };
 
 } // namespace kengine

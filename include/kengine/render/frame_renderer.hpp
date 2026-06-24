@@ -8,6 +8,7 @@
 #include "kengine/render/texture.hpp"
 #include "kengine/vulkan/context.hpp"
 #include "kengine/vulkan/swapchain.hpp"
+#include "kengine/game/game_entity.hpp"
 #include <cstdint>
 #include <vulkan/vulkan_raii.hpp>
 #include <vector>
@@ -32,6 +33,10 @@ public:
     void set_ship_velocity(float vx, float vy, float vz = 0.0f) { ship_vel_x_ = vx; ship_vel_y_ = vy; ship_vel_z_ = vz; }
     void set_ship_zw(float z, float w) { ship_z_ = z; ship_w_ = w; }
 
+    // Access for GameEntity prototype spawning
+    void add_bullet(const GameEntity& b) { bullets_game.push_back(b); }
+    std::vector<GameEntity>& get_bullets_game() { return bullets_game; }
+
     // Lightweight bullet data for renderer (populated from ECS)
     struct BulletVisual {
         float x, y, z, w;
@@ -42,6 +47,17 @@ public:
 
     // Receive current live bullets from game logic (for rendering + trails)
     void set_bullets(const std::vector<BulletVisual>& bullets) { bullets_ = bullets; }
+
+    // Enemy visuals for prototype (Galaga formations)
+    struct EnemyVisual {
+        float x, y, z, w;
+        float yaw;
+        float scale;
+        std::uint32_t color;
+    };
+
+    // Receive enemies
+    void set_enemies(const std::vector<EnemyVisual>& e) { enemies_ = e; }
 
     // Update starfield flow from ship's velocity (call every frame after input/physics)
     void update_background_flow(float ship_vx, float ship_vy, float ship_vz, float dt);
@@ -121,6 +137,16 @@ private:
     std::optional<Texture> demoTexture_;  // for bindless demo on stars
 
     std::vector<BulletVisual> bullets_;
+    std::vector<EnemyVisual> enemies_;
+
+    // Prototype game entities (fast path before full ECS integration)
+    GameEntity player;
+    std::vector<GameEntity> enemies_game;
+    std::vector<GameEntity> bullets_game;
+
+    void init_game_entities();
+    void update_game_entities(float dt);
+    void render_game_entities();  // called from update_moving_stars or similar
 };
 
 } // namespace kengine
