@@ -29,6 +29,8 @@ public:
     void recreate_swapchain_sync();  // recreate per-image semaphores/fences when swapchain image count changes
 
     void set_ship_position(float x, float y) { ship_x_ = x; ship_y_ = y; }
+    void set_ship_velocity(float vx, float vy, float vz = 0.0f) { ship_vel_x_ = vx; ship_vel_y_ = vy; ship_vel_z_ = vz; }
+    void set_ship_zw(float z, float w) { ship_z_ = z; ship_w_ = w; }
 
 private:
     void create_sync_objects();
@@ -81,6 +83,11 @@ private:
 
     float ship_x_ = 0.0f;
     float ship_y_ = -0.65f;
+    float ship_vel_x_ = 0.0f;
+    float ship_vel_y_ = 0.0f;
+    float ship_vel_z_ = 0.0f;
+    float ship_z_ = 1.6f;
+    float ship_w_ = 0.05f;
 
     struct MovingStar {
         float base_x, base_y;

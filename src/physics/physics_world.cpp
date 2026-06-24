@@ -71,4 +71,32 @@ void PhysicsWorld::set_gravity(float x, float y, float z, float w) {
     world_->gravity[3] = w;
 }
 
+// --- Spatial queries ---
+
+int PhysicsWorld::query_radius(float cx, float cy, float cz, float radius,
+                               int32_t* out, int max_out) const {
+    if (!spatial_) return 0;
+    return ke_spatial_hash_query_radius(spatial_, cx, cy, cz, radius, out, max_out);
+}
+
+int PhysicsWorld::query_aabb(float minx, float miny, float minz,
+                             float maxx, float maxy, float maxz,
+                             int32_t* out, int max_out) const {
+    if (!spatial_) return 0;
+    return ke_spatial_hash_query_aabb(spatial_, minx, miny, minz, maxx, maxy, maxz, out, max_out);
+}
+
+void PhysicsWorld::visit_radius(float cx, float cy, float cz, float radius,
+                                SpatialVisitFn fn, void* user) const {
+    if (!spatial_ || !fn) return;
+    ke_spatial_hash_visit_radius(spatial_, cx, cy, cz, radius, fn, user);
+}
+
+void PhysicsWorld::visit_aabb(float minx, float miny, float minz,
+                              float maxx, float maxy, float maxz,
+                              SpatialVisitFn fn, void* user) const {
+    if (!spatial_ || !fn) return;
+    ke_spatial_hash_visit_aabb(spatial_, minx, miny, minz, maxx, maxy, maxz, fn, user);
+}
+
 } // namespace kengine

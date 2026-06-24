@@ -47,6 +47,7 @@ struct RetroVertex2D {
 
 struct RetroVertex4D {
     float pos[4];
+    float vel[3];   // xyz velocity from physics for motion blur / speed glow / trails
     float uv[2];
     std::uint32_t color;
     std::uint32_t texIndex = 0;  // bindless texture index

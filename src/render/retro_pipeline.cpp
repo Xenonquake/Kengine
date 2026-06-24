@@ -41,6 +41,7 @@ static GraphicsPipelineDesc desc_sprite4d(const DynamicRenderingFormats& formats
     d.bindings  = {{0, sizeof(RetroVertex4D), vk::VertexInputRate::eVertex}};
     d.attributes = {
         {0, 0, vk::Format::eR32G32B32A32Sfloat, offsetof(RetroVertex4D, pos)},
+        {4, 0, vk::Format::eR32G32B32Sfloat,    offsetof(RetroVertex4D, vel)},  // loc4 for vel
         {1, 0, vk::Format::eR32G32Sfloat,      offsetof(RetroVertex4D, uv)},
         {2, 0, vk::Format::eR32Uint,           offsetof(RetroVertex4D, color)},
         {3, 0, vk::Format::eR32Uint,           offsetof(RetroVertex4D, texIndex)}

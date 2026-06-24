@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kengine/core/job_system.hpp"
+#include "kengine/ecs/entity.hpp"
 #include "kengine/ecs/registry.hpp"
 #include "kengine/lighting/spherical_harmonics.hpp"
 #include "kengine/physics/physics_world.hpp"
@@ -71,6 +72,21 @@ private:
     float ship_x_ = 0.0f;
     float ship_y_ = -0.65f;
     float ship_speed_ = 1.4f;
+    float ship_vel_x_ = 0.0f;
+    float ship_vel_y_ = 0.0f;
+    float ship_vel_z_ = 0.0f;
+    float ship_z_ = 1.6f;
+    float ship_w_ = 0.05f;
+
+    // Player entity driven by 3D input -> physics velocity
+    Entity player_entity_;
+    int    player_body_index_ = -1;
+
+    // AI drones that steer toward player
+    std::vector<Entity> drones_;
+
+    // Fire rate limiter for demo projectiles
+    float fire_cooldown_ = 0.0f;
 };
 
 } // namespace kengine

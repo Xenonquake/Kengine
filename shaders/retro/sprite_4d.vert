@@ -4,12 +4,14 @@ layout(location = 0) in vec4 inPos;
 layout(location = 1) in vec2 inUV;
 layout(location = 2) in uint inColor;
 layout(location = 3) in uint inTexIndex;
+layout(location = 4) in vec3 inVel;
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) out float vGlow;
 layout(location = 3) out float vPaletteIdx;
 layout(location = 4) out flat uint vTexIndex;
+layout(location = 5) out float vSpeed;
 
 layout(push_constant) uniform PC {
     mat4 mvp;
@@ -56,9 +58,11 @@ void main() {
     }
 
     gl_Position = pc.mvp * vec4(pos3, 1.0);
+    float speed = length(inVel);
     vUV = inUV;
     vColor = unpackUnorm4x8(inColor);
-    vGlow = pc.glow_intensity * (1.0 + abs(sin(pc.time * 4.0 + p.w)) * 0.5);
+    vGlow = pc.glow_intensity * (1.0 + abs(sin(pc.time * 4.0 + p.w)) * 0.5 + speed * 0.1);
     vPaletteIdx = float(inColor & 0xFFu) / 255.0;
     vTexIndex = inTexIndex;
+    vSpeed = speed;
 }

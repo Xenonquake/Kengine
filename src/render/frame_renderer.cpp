@@ -138,15 +138,16 @@ static vk::raii::DeviceMemory alloc_and_bind_host(const vk::raii::Device& dev,
 }
 
 static std::vector<RetroVertex4D> make_sprite_quad(float x, float y, float z, float w,
-                                                   float sx, float sy, std::uint32_t color, std::uint32_t texIndex = 0) {
+                                                   float sx, float sy, std::uint32_t color, std::uint32_t texIndex = 0,
+                                                   float vx = 0.0f, float vy = 0.0f, float vz = 0.0f) {
     // tiny quad as two tris, uv for the sprite shader
     std::vector<RetroVertex4D> q(6);
-    q[0] = {{-sx + x, -sy + y, z, w}, {0, 1}, color, texIndex};
-    q[1] = {{ sx + x, -sy + y, z, w}, {1, 1}, color, texIndex};
-    q[2] = {{ sx + x,  sy + y, z, w}, {1, 0}, color, texIndex};
-    q[3] = {{-sx + x, -sy + y, z, w}, {0, 1}, color, texIndex};
-    q[4] = {{ sx + x,  sy + y, z, w}, {1, 0}, color, texIndex};
-    q[5] = {{-sx + x,  sy + y, z, w}, {0, 0}, color, texIndex};
+    q[0] = {{-sx + x, -sy + y, z, w}, {vx, vy, vz}, {0, 1}, color, texIndex};
+    q[1] = {{ sx + x, -sy + y, z, w}, {vx, vy, vz}, {1, 1}, color, texIndex};
+    q[2] = {{ sx + x,  sy + y, z, w}, {vx, vy, vz}, {0, 0}, color, texIndex};
+    q[3] = {{-sx + x, -sy + y, z, w}, {vx, vy, vz}, {0, 1}, color, texIndex};
+    q[4] = {{ sx + x,  sy + y, z, w}, {vx, vy, vz}, {1, 0}, color, texIndex};
+    q[5] = {{-sx + x,  sy + y, z, w}, {vx, vy, vz}, {0, 0}, color, texIndex};
     return q;
 }
 
@@ -170,7 +171,8 @@ void FrameRenderer::create_geometry_buffers() {
     std::vector<RetroVertex4D> initial_sprites;
     for (auto& s : moving_stars_) {
         float z = s.depth;
-        auto q = make_sprite_quad(s.base_x, s.base_y, z, 0.0f, s.size, s.size, s.color, 1);
+        // forward vel for motion effects
+        auto q = make_sprite_quad(s.base_x, s.base_y, z, 0.0f, s.size, s.size, s.color, 1, 0.f, 0.f, s.speed);
         initial_sprites.insert(initial_sprites.end(), q.begin(), q.end());
     }
     // room for exhaust trail quads (5*6 = 30 verts)
@@ -185,12 +187,12 @@ void FrameRenderer::create_geometry_buffers() {
 
     // --- Vector ship at bottom (Space Invaders style) ---
     ship_base_shape_ = {
-        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // nose top
-        {{-0.08f, -0.02f, 0.0f, 0.0f}, {0.0f, 1.0f}, 0xFFCCFFFFu},
-        {{-0.04f, -0.06f, 0.0f, 0.0f}, {0.25f, 0.6f}, 0xFFAAEEFFu},
-        {{ 0.04f, -0.06f, 0.0f, 0.0f}, {0.75f, 0.6f}, 0xFFAAEEFFu},
-        {{ 0.08f, -0.02f, 0.0f, 0.0f}, {1.0f, 1.0f}, 0xFFCCFFFFu},
-        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0.5f, 0.0f}, 0xFFFFFFFFu},
+        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0,0,0}, {0.5f, 0.0f}, 0xFFFFFFFFu}, // nose top
+        {{-0.08f, -0.02f, 0.0f, 0.0f}, {0,0,0}, {0.0f, 1.0f}, 0xFFCCFFFFu},
+        {{-0.04f, -0.06f, 0.0f, 0.0f}, {0,0,0}, {0.25f, 0.6f}, 0xFFAAEEFFu},
+        {{ 0.04f, -0.06f, 0.0f, 0.0f}, {0,0,0}, {0.75f, 0.6f}, 0xFFAAEEFFu},
+        {{ 0.08f, -0.02f, 0.0f, 0.0f}, {0,0,0}, {1.0f, 1.0f}, 0xFFCCFFFFu},
+        {{ 0.00f,  0.12f, 0.0f, 0.0f}, {0,0,0}, {0.5f, 0.0f}, 0xFFFFFFFFu},
     };
     ship_vertex_count_ = static_cast<std::uint32_t>(ship_base_shape_.size());
 
@@ -217,6 +219,7 @@ void FrameRenderer::create_geometry_buffers() {
 }
 
 static RetroVertex4D transform_ship_vert(const RetroVertex4D& base, float cx, float cy, float cz, float cw,
+                                         float vx, float vy, float vz,
                                          float yaw, float pitch_w) {
     // very simple 2D-ish yaw in xy + slight w modulation
     float c = cosf(yaw), s = sinf(yaw);
@@ -229,21 +232,22 @@ static RetroVertex4D transform_ship_vert(const RetroVertex4D& base, float cx, fl
     v.pos[1] = y + cy;
     v.pos[2] = z + cz;
     v.pos[3] = w;
+    v.vel[0] = vx;
+    v.vel[1] = vy;
+    v.vel[2] = vz;
     return v;
 }
 
 void FrameRenderer::update_ship_geometry(float time) {
     if (ship_base_shape_.empty() || ship_vertex_count_ == 0) return;
 
-    // Ship fixed at bottom (Space Invaders style), controlled by input
-    // No 4D forward/back
-    float ship_z = 1.6f;
-    float ship_w = 0.05f;
+    // Ship now driven by player physics (x/y + full 4D morph via shader + vel for effects)
     float yaw = 0.0f;  // always pointing up
 
     std::vector<RetroVertex4D> live(ship_base_shape_.size());
     for (size_t i = 0; i < live.size(); ++i) {
-        live[i] = transform_ship_vert(ship_base_shape_[i], ship_x_, ship_y_, ship_z, ship_w, yaw, 0.0f);
+        live[i] = transform_ship_vert(ship_base_shape_[i], ship_x_, ship_y_, ship_z_, ship_w_,
+                                      ship_vel_x_, ship_vel_y_, ship_vel_z_, yaw, 0.0f);
     }
 
     vk::DeviceSize sz = sizeof(RetroVertex4D) * live.size();
@@ -265,7 +269,7 @@ void FrameRenderer::update_moving_stars(float dt) {
             s.base_y = ((rand() % 2000) / 1000.0f - 1.0f) * 0.7f;
         }
         float sz = s.size * (1.0f + (s.depth + 2.8f) * 0.4f); // grow as it approaches
-        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color, 1);
+        auto q = make_sprite_quad(s.base_x, s.base_y, s.depth, 0.0f, sz, sz, s.color, 1, 0.f, 0.f, s.speed);
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
@@ -278,13 +282,14 @@ void FrameRenderer::update_moving_stars(float dt) {
         float es = 0.022f - e * 0.002f;
         if (es < 0.005f) es = 0.005f;
         std::uint32_t ecol = (e < 2) ? 0xFFFFFFFFu : 0xFFEEFFFFu;
-        auto q = make_sprite_quad(ex, ey, ez, 0.0f, es, es * 0.7f, ecol, 1);
+        // exhaust has velocity from ship
+        auto q = make_sprite_quad(ex, ey, ez, 0.0f, es, es * 0.7f, ecol, 1, 0.f, -0.8f, 0.f);
         sprite_verts.insert(sprite_verts.end(), q.begin(), q.end());
     }
 
     // pad if needed
     while (sprite_verts.size() < sprite_vertex_count_) {
-        sprite_verts.push_back({{0,0,0,0}, {0,0}, 0});
+        sprite_verts.push_back({{0,0,0,0}, {0,0,0}, {0,0}, 0, 0});
     }
     if (sprite_verts.size() > sprite_vertex_count_) sprite_verts.resize(sprite_vertex_count_);
 

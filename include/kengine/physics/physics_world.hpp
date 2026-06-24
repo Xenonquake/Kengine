@@ -33,6 +33,23 @@ public:
 
     void set_gravity(float x, float y, float z, float w = 0.0f);
 
+    // --- Spatial hash access (3D on xyz; rebuilt automatically after each step) ---
+    ke_spatial_hash* spatial_hash() { return spatial_; }
+    const ke_spatial_hash* spatial_hash() const { return spatial_; }
+
+    // Query helpers (return indices into bodies; 0..body_count()-1 at time of last rebuild)
+    int query_radius(float cx, float cy, float cz, float radius, int32_t* out, int max_out) const;
+    int query_aabb(float minx, float miny, float minz,
+                   float maxx, float maxy, float maxz,
+                   int32_t* out, int max_out) const;
+
+    // Callback visit (C-style, zero-alloc)
+    using SpatialVisitFn = void (*)(int32_t body_index, void* user);
+    void visit_radius(float cx, float cy, float cz, float radius, SpatialVisitFn fn, void* user) const;
+    void visit_aabb(float minx, float miny, float minz,
+                    float maxx, float maxy, float maxz,
+                    SpatialVisitFn fn, void* user) const;
+
 private:
     ke_phys_world* world_ = nullptr;
     ke_spatial_hash* spatial_ = nullptr;
