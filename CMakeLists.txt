@@ -110,9 +110,9 @@ target_include_directories(kengine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/c_modules/math
     ${CMAKE_CURRENT_SOURCE_DIR}/c_modules/sh
     ${CMAKE_CURRENT_SOURCE_DIR}/c_modules/physics
-    ${vma_SOURCE_DIR}/include
+    ${VMA_INCLUDE_DIR}      # Official Vulkan Memory Allocator (local or fetched)
     ${stb_SOURCE_DIR}
-    ${glm_SOURCE_DIR}   # GLM for C++ code
+    ${glm_SOURCE_DIR}       # GLM for C++ code
     ${tinygltf_SOURCE_DIR}  # tinygltf for .glb model loading
 )
 target_link_libraries(kengine PUBLIC

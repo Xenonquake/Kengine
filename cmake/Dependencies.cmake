@@ -14,14 +14,34 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(glfw)
 
-# Vulkan Memory Allocator
-FetchContent_Declare(
-    vma
-    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-    GIT_TAG        v3.1.0
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(vma)
+# ------------------------------------------------------------------
+# Vulkan Memory Allocator (VMA) - Official integration
+#
+# The project now prefers a local checkout of the official VMA:
+#   ~/Downloads/GitHub_Repos/VulkanMemoryAllocator
+#
+# You can override with:
+#   cmake -DVMA_LOCAL_PATH=/path/to/your/VulkanMemoryAllocator ..
+#
+# Falls back to FetchContent only if the local header is missing.
+# ------------------------------------------------------------------
+set(VMA_LOCAL_PATH "$ENV{HOME}/Downloads/GitHub_Repos/VulkanMemoryAllocator"
+    CACHE PATH "Path to local official VulkanMemoryAllocator checkout")
+
+if(EXISTS "${VMA_LOCAL_PATH}/include/vk_mem_alloc.h")
+    message(STATUS "Using official local VMA from ${VMA_LOCAL_PATH}")
+    set(VMA_INCLUDE_DIR "${VMA_LOCAL_PATH}/include" CACHE PATH "VMA include directory")
+else()
+    message(STATUS "Local VMA not found – falling back to FetchContent")
+    FetchContent_Declare(
+        vma
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+        GIT_TAG        v3.1.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(vma)
+    set(VMA_INCLUDE_DIR "${vma_SOURCE_DIR}/include")
+endif()
 
 # stb_image for texture loading (header only)
 FetchContent_Declare(
